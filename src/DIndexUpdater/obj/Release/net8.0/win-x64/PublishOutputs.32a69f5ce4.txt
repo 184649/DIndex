@@ -1,0 +1,2 @@
+C:\Program Files\work\git\BITS\DIndex\DIndex_dev\src\DIndexUpdater\bin\Release\net8.0\win-x64\publish\DIndexUpdater.pdb
+C:\Program Files\work\git\BITS\DIndex\DIndex_dev\src\DIndexUpdater\bin\Release\net8.0\win-x64\publish\DIndexUpdater.exe

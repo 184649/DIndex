@@ -1,0 +1,14 @@
+C:\Program Files\work\git\BITS\DIndex\DIndex_dev\src\DIndexUpdater\bin\Release\net8.0\DIndexUpdater.exe
+C:\Program Files\work\git\BITS\DIndex\DIndex_dev\src\DIndexUpdater\bin\Release\net8.0\DIndexUpdater.deps.json
+C:\Program Files\work\git\BITS\DIndex\DIndex_dev\src\DIndexUpdater\bin\Release\net8.0\DIndexUpdater.runtimeconfig.json
+C:\Program Files\work\git\BITS\DIndex\DIndex_dev\src\DIndexUpdater\bin\Release\net8.0\DIndexUpdater.dll
+C:\Program Files\work\git\BITS\DIndex\DIndex_dev\src\DIndexUpdater\bin\Release\net8.0\DIndexUpdater.pdb
+C:\Program Files\work\git\BITS\DIndex\DIndex_dev\src\DIndexUpdater\obj\Release\net8.0\DIndexUpdater.GeneratedMSBuildEditorConfig.editorconfig
+C:\Program Files\work\git\BITS\DIndex\DIndex_dev\src\DIndexUpdater\obj\Release\net8.0\DIndexUpdater.AssemblyInfoInputs.cache
+C:\Program Files\work\git\BITS\DIndex\DIndex_dev\src\DIndexUpdater\obj\Release\net8.0\DIndexUpdater.AssemblyInfo.cs
+C:\Program Files\work\git\BITS\DIndex\DIndex_dev\src\DIndexUpdater\obj\Release\net8.0\DIndexUpdater.csproj.CoreCompileInputs.cache
+C:\Program Files\work\git\BITS\DIndex\DIndex_dev\src\DIndexUpdater\obj\Release\net8.0\DIndexUpdater.dll
+C:\Program Files\work\git\BITS\DIndex\DIndex_dev\src\DIndexUpdater\obj\Release\net8.0\refint\DIndexUpdater.dll
+C:\Program Files\work\git\BITS\DIndex\DIndex_dev\src\DIndexUpdater\obj\Release\net8.0\DIndexUpdater.pdb
+C:\Program Files\work\git\BITS\DIndex\DIndex_dev\src\DIndexUpdater\obj\Release\net8.0\DIndexUpdater.genruntimeconfig.cache
+C:\Program Files\work\git\BITS\DIndex\DIndex_dev\src\DIndexUpdater\obj\Release\net8.0\ref\DIndexUpdater.dll

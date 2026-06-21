@@ -1,0 +1,27 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DIndex", "src\DIndex\DIndex.csproj", "{2DEA5B5D-5EE7-4A50-8332-4249F4F11B62}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DIndexUpdater", "src\DIndexUpdater\DIndexUpdater.csproj", "{C6049915-4FC7-4BBA-BE16-4780E2055280}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{2DEA5B5D-5EE7-4A50-8332-4249F4F11B62}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2DEA5B5D-5EE7-4A50-8332-4249F4F11B62}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2DEA5B5D-5EE7-4A50-8332-4249F4F11B62}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2DEA5B5D-5EE7-4A50-8332-4249F4F11B62}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C6049915-4FC7-4BBA-BE16-4780E2055280}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C6049915-4FC7-4BBA-BE16-4780E2055280}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C6049915-4FC7-4BBA-BE16-4780E2055280}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C6049915-4FC7-4BBA-BE16-4780E2055280}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
