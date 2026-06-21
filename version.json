@@ -1,0 +1,6 @@
+﻿{
+    "version":  "1.0.0",
+    "downloadUrl":  "https://raw.githubusercontent.com/Chairman-bits/DIndex/main/DIndex.zip",
+    "updaterUrl":  "https://raw.githubusercontent.com/Chairman-bits/DIndex/main/DIndexUpdater.zip",
+    "releaseNotes":  "https://raw.githubusercontent.com/Chairman-bits/DIndex/main/release-notes.json"
+}
