@@ -40,6 +40,7 @@ internal static class Program
             if ((File.GetAttributes(appPath) & FileAttributes.ReparsePoint) != 0)
                 throw new InvalidDataException("Updating a linked executable is not supported.");
             var appDirectory = Path.GetDirectoryName(appPath)!;
+            InstallationMode.ThrowIfMsiManaged(appDirectory);
             appPathForRecovery = appPath;
             // One updater per installation. Never kill an application or replace files while it is still running.
             using var updateLock = new FileStream(Path.Combine(appDirectory, ".dindex-update.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose);
@@ -120,6 +121,7 @@ internal static class Program
 
     internal static void InstallVerifiedExecutable(string stagedExecutable, string appPath, Action<string, string, string>? replace = null)
     {
+        InstallationMode.ThrowIfMsiManaged(Path.GetDirectoryName(Path.GetFullPath(appPath))!);
         UpdatePackageSafety.ValidatePortableExecutable(stagedExecutable);
         UpdatePackageSafety.ValidatePortableExecutable(appPath);
         var originalHash = HashFile(appPath);

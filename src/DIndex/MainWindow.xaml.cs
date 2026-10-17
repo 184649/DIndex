@@ -60,7 +60,7 @@ public partial class MainWindow : System.Windows.Window
         if (!string.IsNullOrWhiteSpace(_settingsRepository.LastLoadWarning))
             ShowPersistentWarning(_settingsRepository.LastLoadWarning);
 
-        VersionText.Text = $"Version {_updateService.CurrentVersion}" + (_updateService.IsPreviewBuild ? " / 開発ブランチ検証版" : " / GitHub更新対応");
+        VersionText.Text = $"Version {_updateService.CurrentVersion}" + (_updateService.IsMsiInstalled ? " / MSI管理" : _updateService.IsPreviewBuild ? " / 開発ブランチ検証版" : " / GitHub更新対応");
 
         // 初回起動時はウィンドウを表示しないため、Loadedイベントは発火しない場合があります。
         // タスクトレイアイコンとバックグラウンド処理はコンストラクターで開始します。

@@ -167,7 +167,14 @@ public sealed class SettingsRepository
         fingerprint = Convert.ToHexString(SHA256.HashData(bytes));
         using var input = new MemoryStream(bytes);
         using var reader = new StreamReader(input, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
-        var settings = JsonSerializer.Deserialize<AppSettings>(reader.ReadToEnd(), Options) ?? throw new InvalidDataException("設定が空です。");
+        var json = reader.ReadToEnd();
+        using var document = JsonDocument.Parse(json);
+        if (document.RootElement.ValueKind == JsonValueKind.Object)
+            foreach (var property in document.RootElement.EnumerateObject())
+                if (property.Name.Equals(nameof(AppSettings.SchemaVersion), StringComparison.OrdinalIgnoreCase) &&
+                    (property.Value.ValueKind != JsonValueKind.Number || !property.Value.TryGetInt32(out var schema) || schema < 0 || schema > 1))
+                    throw new InvalidOperationException("新しい、または未対応の設定形式です。バックアップへの自動巻戻しと保存を停止します。対応する新しいDIndexで開いてください。");
+        var settings = JsonSerializer.Deserialize<AppSettings>(json, Options) ?? throw new InvalidDataException("設定が空です。");
         Validate(settings);
         settings.SearchRoots = settings.SearchRoots.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         settings.ExcludeFolderNames = settings.ExcludeFolderNames.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
@@ -176,6 +183,8 @@ public sealed class SettingsRepository
 
     private static void Validate(AppSettings settings)
     {
+        if (settings.SchemaVersion < 0 || settings.SchemaVersion > 1)
+            throw new InvalidOperationException("未対応の設定形式です。新しいDIndexで開いてください。保存は行いません。");
         if (settings.SearchRoots is null || settings.ExcludeFolderNames is null || settings.SearchRoots.Any(string.IsNullOrWhiteSpace) ||
             settings.ExcludeFolderNames.Any(string.IsNullOrWhiteSpace) || settings.ResultLimit < 1 || settings.ResultLimit > 100_000)
             throw new InvalidDataException("設定の検索フォルダ、除外名、または表示件数が不正です。表示件数は 1～100,000 にしてください。");

@@ -5,3 +5,4 @@
 *.suo
 tests/**/test-results/
 tests/**/results/
+artifacts/

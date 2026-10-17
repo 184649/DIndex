@@ -1,0 +1,11 @@
+{
+  "app": "DIndex",
+  "project": "src/DIndex/DIndex.csproj",
+  "icon": "src/DIndex/Assets/app.ico",
+  "manufacturer": "DIndex Project",
+  "upgradeCode": "8FE0AC19-A912-4ACF-8B69-6774C78DE12B",
+  "installFolder": "DIndex-Preview",
+  "productName": "DIndex Preview",
+  "registryKey": "Software\\DIndex\\PreviewInstaller",
+  "dataFolder": "DIndex-Preview"
+}

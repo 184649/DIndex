@@ -7,6 +7,12 @@ namespace DIndex;
 
 public sealed class AppSettings
 {
+    // Missing schema in legacy settings is schema 1. Preserve additive settings
+    // we do not understand when an ordinary preference is saved.
+    public int SchemaVersion { get; set; } = 1;
+    [JsonExtensionData]
+    public Dictionary<string, System.Text.Json.JsonElement>? AdditionalSettings { get; set; }
+
     public List<string> SearchRoots { get; set; } = new();
     public bool SearchPath { get; set; } = true;
     public bool IncludeDirectories { get; set; } = true;

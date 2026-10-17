@@ -96,8 +96,8 @@ if errorlevel 1 (
 )
 
 echo [5/6] create compressed zip files...
-set APP_PUBLISH=%PROJECT_DIR%\bin\Release\net8.0-windows\win-x64\publish
-set UPDATER_PUBLISH=%UPDATER_DIR%\bin\Release\net8.0\win-x64\publish
+set APP_PUBLISH=%PROJECT_DIR%\bin\Release\net10.0-windows\win-x64\publish
+set UPDATER_PUBLISH=%UPDATER_DIR%\bin\Release\net10.0\win-x64\publish
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$release='%RELEASE_DIR%';" ^

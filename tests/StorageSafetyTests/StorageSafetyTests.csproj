@@ -1,7 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>12.0</LangVersion>
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <StartupObject>StorageSafetyTests.Program</StartupObject>
@@ -15,6 +16,7 @@
     <Compile Include="../../src/DIndex/SettingsRepository.cs" Link="Source/SettingsRepository.cs" />
     <Compile Include="../../src/DIndex/UpdateService.cs" Link="Source/UpdateService.cs" />
     <Compile Include="../../src/Shared/UpdatePackageSafety.cs" Link="Source/UpdatePackageSafety.cs" />
+    <Compile Include="../../src/Shared/InstallationMode.cs" Link="Source/InstallationMode.cs" />
     <Compile Include="../../src/DIndexUpdater/Program.cs" Link="Source/UpdaterProgram.cs" />
   </ItemGroup>
 </Project>

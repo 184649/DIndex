@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+  <Product Id="$(var.ProductCode)" Name="$(var.ProductName)" Language="1033"
+           Version="$(var.PackageVersion)" Manufacturer="$(var.Manufacturer)"
+           UpgradeCode="$(var.UpgradeCode)">
+    <Package Id="*" InstallerVersion="500" Compressed="yes" Platform="x64"
+             InstallScope="perUser" InstallPrivileges="limited"
+             Description="$(var.ProductName), current user only" />
+    <!-- Removal is inside the transaction, so a failed upgrade restores the old MSI. -->
+    <MajorUpgrade Schedule="afterInstallInitialize" MigrateFeatures="yes"
+                  AllowSameVersionUpgrades="no" AllowDowngrades="no"
+                  DowngradeErrorMessage="A newer version of [ProductName] is already installed. Use that version or a newer MSI." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <Property Id="INSTALLLEVEL" Value="1" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="DisableShutdown" />
+    <Property Id="MSIDISABLERMRESTART" Value="1" />
+    <Property Id="REBOOT" Value="ReallySuppress" />
+    <!-- VersionNT can report 603 on Windows 10+. Read the actual 64-bit OS
+         version without changing any machine-wide registry data. REG_DWORD
+         AppSearch values use a leading #. Windows 11 also has major version 10. -->
+    <Property Id="WINDOWS_MAJOR" Secure="yes">
+      <RegistrySearch Id="FindWindowsMajor" Root="HKLM" Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                      Name="CurrentMajorVersionNumber" Type="raw" Win64="yes" />
+    </Property>
+    <Property Id="WINDOWS_BUILD" Secure="yes">
+      <RegistrySearch Id="FindWindowsBuild" Root="HKLM" Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                      Name="CurrentBuildNumber" Type="raw" Win64="yes" />
+    </Property>
+    <Icon Id="AppIcon" SourceFile="$(var.IconPath)" />
+    <Condition Message="This package requires 64-bit Windows.">Installed OR VersionNT64</Condition>
+    <Condition Message="This package requires Windows 10 version 1607 (build 14393) or later, or Windows Server 2016 or later. Use an edition still supported by Microsoft.">Installed OR (WINDOWS_MAJOR = "#10" AND WINDOWS_BUILD &gt;= 14393)</Condition>
+    <Condition Message="This installer is current-user only. Do not set ALLUSERS.">NOT ALLUSERS</Condition>
+
+    <!-- Detection only. No WM_CLOSE, WM_ENDSESSION, elevation, termination or reboot. -->
+    <util:CloseApplication Id="DetectRunningApp" Target="$(var.AppExe)"
+                           Property="APP_RUNNING" CloseMessage="no" EndSessionMessage="no"
+                           ElevatedCloseMessage="no" ElevatedEndSessionMessage="no"
+                           RebootPrompt="no" PromptToContinue="no" Timeout="0" />
+    <CustomAction Id="RequireClosedApp" Error="Please quit $(var.AppName) completely (including its notification-area icon), then run setup again. Setup will never force-close it." />
+    <InstallExecuteSequence>
+      <Custom Action="WixCloseApplications" Before="InstallValidate">1</Custom>
+      <Custom Action="RequireClosedApp" After="WixCloseApplications">APP_RUNNING</Custom>
+    </InstallExecuteSequence>
+    <?if $(var.FixtureBuild) = 1 ?>
+    <!-- This failure injection is compiled ONLY into an isolated fixture identity. -->
+    <CustomActionRef Id="WixFailWhenDeferred" />
+    <?endif ?>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="UserProgramsFolder" Name="Programs">
+          <Directory Id="INSTALLFOLDER" Name="$(var.InstallFolder)" />
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="AppMenuFolder" Name="$(var.ProductName)" />
+      </Directory>
+      <Directory Id="DesktopFolder" />
+      <Directory Id="StartupFolder" />
+    </Directory>
+
+    <DirectoryRef Id="AppMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="$(var.StartMenuGuid)" Win64="yes">
+        <Shortcut Id="StartMenuLink" Name="$(var.ProductName)" Target="[INSTALLFOLDER]$(var.AppExe)"
+                  WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" Advertise="no" />
+        <RemoveFolder Id="RemoveAppMenuFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="$(var.RegistryKey)" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+    <DirectoryRef Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="$(var.DesktopGuid)" Win64="yes">
+        <Shortcut Id="DesktopLink" Name="$(var.ProductName)" Target="[INSTALLFOLDER]$(var.AppExe)"
+                  WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" Advertise="no" />
+        <RegistryValue Root="HKCU" Key="$(var.RegistryKey)" Name="Desktop" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+    <DirectoryRef Id="StartupFolder">
+      <Component Id="StartupShortcut" Guid="$(var.StartupGuid)" Win64="yes">
+        <Shortcut Id="StartupLink" Name="$(var.ProductName)" Target="[INSTALLFOLDER]$(var.AppExe)"
+                  WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" Advertise="no" />
+        <RegistryValue Root="HKCU" Key="$(var.RegistryKey)" Name="Startup" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+    <Feature Id="Core" Title="$(var.ProductName)" Description="Application, bundled .NET runtime and Start menu shortcut. Required."
+             Level="1" Absent="disallow" AllowAdvertise="no" Display="expand">
+      <ComponentGroupRef Id="PublishedPayload" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+    <Feature Id="DesktopShortcutFeature" Title="Desktop shortcut" Description="Optional. Create a shortcut on your desktop."
+             Level="2" AllowAdvertise="no">
+      <ComponentRef Id="DesktopShortcut" />
+    </Feature>
+    <Feature Id="StartupShortcutFeature" Title="Start when you sign in" Description="Optional. Launch this preview when you sign in to Windows."
+             Level="2" AllowAdvertise="no">
+      <ComponentRef Id="StartupShortcut" />
+    </Feature>
+    <UIRef Id="PreviewUI" />
+  </Product>
+</Wix>

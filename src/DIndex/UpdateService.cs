@@ -14,6 +14,12 @@ public sealed class UpdateService
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
     private readonly SemaphoreSlim _updateGate = new(1, 1);
     private bool _updateStarted;
+    private readonly string _applicationDirectory;
+
+    public UpdateService() : this(AppContext.BaseDirectory) { }
+    internal UpdateService(string applicationDirectory) => _applicationDirectory = Path.GetFullPath(applicationDirectory);
+    public bool IsMsiInstalled => InstallationMode.IsMsiManaged(_applicationDirectory);
+    public string InstalledUpdateMessage => InstallationMode.UpdateMessage;
 
     public bool IsPreviewBuild => Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Contains("-preview", StringComparison.OrdinalIgnoreCase) == true;
 
@@ -21,6 +27,7 @@ public sealed class UpdateService
 
     public async Task<(bool HasUpdate, UpdateInfo? Info, string Message)> CheckAsync(CancellationToken cancellationToken)
     {
+        if (IsMsiInstalled) return (false, null, InstallationMode.UpdateMessage);
         if (IsPreviewBuild) return (false, null, "開発版は自動更新の対象外です。このブランチから再ビルドして更新してください。");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
@@ -63,6 +70,7 @@ public sealed class UpdateService
         try
         {
             if (_updateStarted) return false;
+            InstallationMode.ThrowIfMsiManaged(_applicationDirectory);
             if (IsPreviewBuild) throw new InvalidOperationException("開発版は自動更新の対象外です。このブランチから再ビルドして更新してください。");
             if (!Version.TryParse(NormalizeVersion(info.Version), out var requestedVersion) || requestedVersion <= new Version(CurrentVersion))
                 throw new InvalidDataException("更新先は現在より新しいバージョンである必要があります。");
@@ -74,6 +82,7 @@ public sealed class UpdateService
             if (!Path.GetFileName(appExe).Equals("DIndex.exe", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("自動更新は配布版 DIndex.exe から実行してください。");
             var appDirectory = Path.GetDirectoryName(appExe)!;
+            InstallationMode.ThrowIfMsiManaged(appDirectory);
             if (File.Exists(Path.Combine(appDirectory, "DIndex.dll")) || File.Exists(Path.Combine(appDirectory, "DIndex.runtimeconfig.json")))
                 throw new InvalidOperationException("この起動方法は開発用ビルドです。自動更新は単一 EXE の配布版のみ対応しています。手動でビルドまたは更新してください。");
             // Fail before closing the application if its installation directory is read-only.

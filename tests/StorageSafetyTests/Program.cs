@@ -26,8 +26,10 @@ internal static class Program
         Environment.SetEnvironmentVariable("DINDEX_DATA_DIR", Path.Combine(Root, "profile"));
         await CacheTests();
         await SettingsTests();
+        await SettingsSchemaTests();
         await PackageTests();
         await UpdaterTests();
+        await InstalledModeTests();
         Console.WriteLine($"Storage safety: {_passed} passed, {_failed} failed.");
         if (args.Length > 0) File.WriteAllText(Path.GetFullPath(args[0]), JsonSerializer.Serialize(new { passed = _passed, failed = _failed, results = Results }, new JsonSerializerOptions { WriteIndented = true }));
         try { Directory.Delete(Root, true); } catch (IOException) { }
@@ -538,4 +540,113 @@ internal static class Program
             True(!Process.GetCurrentProcess().HasExited, "Current test process was killed.");
         });
     }
+    private static async Task InstalledModeTests()
+    {
+        await Test("Portable mode remains available without an MSI marker", () => Run(() =>
+        {
+            var directory = Fixture("portable-mode");
+            File.WriteAllText(Path.Combine(directory, "unrelated.json"), "{}");
+            True(!InstallationMode.IsMsiManaged(directory), "Portable folder treated as MSI-managed.");
+            InstallationMode.ThrowIfMsiManaged(directory);
+        }));
+        foreach (var content in new[] { "{\"schemaVersion\":1,\"app\":\"DIndex\",\"updateMode\":\"msi\"}", "broken json", "" })
+            await Test("MSI marker blocks all EXE update paths: " + (content.Length == 0 ? "empty" : content), async () =>
+            {
+                var directory = Fixture("installed-mode");
+                var marker = Path.Combine(directory, InstallationMode.MarkerFileName);
+                File.WriteAllText(marker, content);
+                var service = new UpdateService(directory);
+                True(service.IsMsiInstalled, "Marker was ignored.");
+                True(!service.IsPreviewBuild, "Test must exercise non-preview assembly version.");
+                var check = await service.CheckAsync(new CancellationToken(canceled: true));
+                True(!check.HasUpdate && check.Info is null, "Installed check offered an EXE update.");
+                Equal(InstallationMode.UpdateMessage, check.Message);
+                var started = await service.StartUpdateAsync(new UpdateInfo { Version = "999.0.0" }, CancellationToken.None);
+                True(!started, "Installed app started an EXE update.");
+                Equal(InstallationMode.UpdateMessage, System.Windows.MessageBox.LastMessage);
+                var app = Path.Combine(directory, "DIndex.exe"); var staged = Path.Combine(directory, "new.exe");
+                File.WriteAllBytes(app, Executable(1)); File.WriteAllBytes(staged, Executable(2));
+                await Throws<InvalidOperationException>(() => Run(() => Updater.InstallVerifiedExecutable(staged, app)));
+                True(Executable(1).SequenceEqual(File.ReadAllBytes(app)), "MSI application was changed.");
+                True(Executable(2).SequenceEqual(File.ReadAllBytes(staged)), "Refusal consumed staged executable.");
+                True(!File.Exists(app + ".bak"), "Refusal mutated installer files.");
+                Equal(content, File.ReadAllText(marker));
+            });
+        await Test("MSI marker directory also fails closed", async () =>
+        {
+            var directory = Fixture("marker-directory");
+            Directory.CreateDirectory(Path.Combine(directory, InstallationMode.MarkerFileName));
+            True(InstallationMode.IsMsiManaged(directory), "Marker directory was ignored.");
+            await Throws<InvalidOperationException>(() => Run(() => InstallationMode.ThrowIfMsiManaged(directory)));
+        });
+        await Test("Updater direct invocation refuses MSI before staging or waiting", async () =>
+        {
+            var directory = Fixture("installed-updater-direct"); var app = Path.Combine(directory, "DIndex.exe");
+            File.WriteAllBytes(app, Executable(1));
+            File.WriteAllText(Path.Combine(directory, InstallationMode.MarkerFileName), "broken marker");
+            var method = typeof(Updater).GetMethod("Main", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+            using var error = new StringWriter(); var previousError = Console.Error;
+            int exitCode;
+            try
+            {
+                Console.SetError(error);
+                exitCode = await (Task<int>)method.Invoke(null, new object[] { new[] {
+                    "--processId", Environment.ProcessId.ToString(), "--appPath", app,
+                    "--appSha256", new string('a', 64), "--appZipPath", Path.Combine(directory, "missing.zip"),
+                    "--dataDirectory", Path.Combine(directory, "profile") } })!;
+            }
+            finally { Console.SetError(previousError); }
+            Equal(1, exitCode);
+            True(error.ToString().Contains(InstallationMode.UpdateMessage), "Direct updater did not refuse installed mode first.");
+            True(Executable(1).SequenceEqual(File.ReadAllBytes(app)), "Direct updater changed MSI application.");
+            True(!File.Exists(app + ".bak"), "Direct updater created a backup.");
+            Equal(0, Directory.GetFiles(directory, "*.staged").Length);
+        });
+    }
+
+    private static async Task SettingsSchemaTests()
+    {
+        await Test("Settings unknown fields survive preference edits and reload", () => Run(() =>
+        {
+            var path = Path.Combine(Fixture("settings-extension"), "settings.json");
+            File.WriteAllText(path, "{\"SearchRoots\":[],\"FutureOption\":{\"enabled\":true,\"values\":[1,2]},\"OtherFlag\":\"keep\"}");
+            var repository = new SettingsRepository(path); var settings = repository.Load();
+            settings.ResultLimit = 1000; repository.Save(settings);
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            Equal(true, document.RootElement.GetProperty("FutureOption").GetProperty("enabled").GetBoolean());
+            Equal(2, document.RootElement.GetProperty("FutureOption").GetProperty("values").GetArrayLength());
+            Equal("keep", document.RootElement.GetProperty("OtherFlag").GetString());
+            Equal(1000, new SettingsRepository(path).Load().ResultLimit);
+        }));
+        foreach (var schema in new[] { "99", "-1", "2147483648", "\"future\"" })
+            await Test("Settings unsupported schema never rolls back primary: " + schema, async () =>
+            {
+                var directory = Fixture("settings-future"); var path = Path.Combine(directory, "settings.json");
+                var original = "{\"SchemaVersion\":" + schema + ",\"SearchRoots\":[\"future-data\"]}";
+                File.WriteAllText(path, original); File.WriteAllText(path + ".bak", "{\"SearchRoots\":[\"old-backup\"]}");
+                var backup = File.ReadAllText(path + ".bak"); var repository = new SettingsRepository(path);
+                Equal(0, repository.Load().SearchRoots.Count);
+                True(repository.LastLoadWarning is not null, "Unsupported schema was hidden.");
+                await Throws<InvalidOperationException>(() => Run(() => repository.Save(new AppSettings())));
+                Equal(original, File.ReadAllText(path)); Equal(backup, File.ReadAllText(path + ".bak"));
+                Equal(0, Directory.GetFiles(directory, "*.corrupt-*").Length);
+            });
+        await Test("Settings future backup blocks fallback and later replacement", async () =>
+        {
+            var directory = Fixture("settings-future-backup"); var path = Path.Combine(directory, "settings.json");
+            File.WriteAllText(path, "corrupt"); File.WriteAllText(path + ".bak", "{\"SchemaVersion\":99}");
+            var repository = new SettingsRepository(path); Equal(0, repository.Load().SearchRoots.Count);
+            await Throws<InvalidOperationException>(() => Run(() => repository.Save(new AppSettings())));
+            Equal("corrupt", File.ReadAllText(path)); Equal("{\"SchemaVersion\":99}", File.ReadAllText(path + ".bak"));
+            Equal(0, Directory.GetFiles(directory, "*.corrupt-*").Length);
+        });
+        await Test("Settings save without load refuses future existing primary", async () =>
+        {
+            var directory = Fixture("settings-save-future"); var path = Path.Combine(directory, "settings.json");
+            const string future = "{\"SchemaVersion\":99}"; File.WriteAllText(path, future);
+            await Throws<InvalidOperationException>(() => Run(() => new SettingsRepository(path).Save(new AppSettings())));
+            Equal(future, File.ReadAllText(path)); Equal(1, Directory.GetFiles(directory).Length);
+        });
+    }
+
 }

@@ -11,8 +11,8 @@ Everythingより速いという実測結果はありません。LinuxのC#コア
 ## 必要なもの
 
 - Windows 10/11 x64
-- ビルドにはMicrosoft公式 .NET 8 SDK
-- 通常ビルド版の実行には .NET 8 Desktop Runtime。self-contained配布版は不要
+- ビルドにはMicrosoft公式 .NET 10 SDK
+- 通常ビルド版の実行には .NET 10 Desktop Runtime。self-contained配布版は不要
 
 ## ソースから起動
 
@@ -34,7 +34,7 @@ New-Item -ItemType Directory -Path $env:DINDEX_DATA_DIR, $testRoot | Out-Null
 Set-Content -LiteralPath (Join-Path $testRoot 'notes-報告書.txt') -Value 'test'
 @{ SearchRoots=@($testRoot); SearchPath=$true; IncludeDirectories=$true; ResultLimit=500; ExcludeFolderNames=@('.git','node_modules','bin','obj') } |
     ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $env:DINDEX_DATA_DIR 'settings.json') -Encoding utf8
-& '.\src\DIndex\bin\Release\net8.0-windows\DIndex.exe'
+& '.\src\DIndex\bin\Release\net10.0-windows\DIndex.exe'
 ```
 
 起動直後は画面を表示せず、タスクトレイに常駐します。隠れているアイコンも確認し、DIndexをダブルクリックして開いてください。ウィンドウを閉じても常駐します。終了はトレイの「終了」です。
@@ -65,3 +65,12 @@ dotnet run --project tests/StorageSafetyTests/StorageSafetyTests.csproj -c Relea
 開発版 `1.1.0-preview.1` は通常リリースからの自動更新対象外です。更新はbranchから再ビルドします。
 
 このブランチの検証でmainへの配置、Release公開、自動mergeは行いません。リポジトリ直下の既存 `DIndex.zip` と `DIndexUpdater.zip` は旧成果物なので、変更確認にはソースからビルドしたものを使ってください。
+
+## ローカル確認用インストーラ
+
+.NET 10 を同梱するユーザー単位のMSIを生成します。インストール先は通常profileと別の `%LOCALAPPDATA%\Programs\DIndex-Preview` です。新規導入、同版の修復、上位版への更新、データを残すアンインストールに対応する構成です。旧portable版のデータは自動移動しません。
+
+- [MSIの作成・試用・更新と制約](docs/INSTALLER.md)
+- [既存profileからの任意の非破壊コピー](docs/PROFILE_IMPORT.md)
+
+インストーラは署名していません。Windowsのセキュリティ警告を回避する設定変更は案内しません。一般公開・自動更新配布はこの検証には含めません。ソースからの生成には既設.NET10 SDK、PowerShell7、WiX3.14.1が必要です。ビルドscriptは不足toolを自動インストールしません。実行するアプリには.NETの別途導入は不要です。
