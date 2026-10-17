@@ -111,9 +111,10 @@ function Get-MsiProductRegistrations([string]$ProductCode) {
     $installer = New-Object -ComObject WindowsInstaller.Installer
     try {
         foreach ($context in @(2, 1, 4)) {
-            # MSI requires no SID for machine enumeration. The current user's
-            # explicit SID restricts user queries without enumerating other users.
-            $querySid = if ($context -eq 4) { $null } else { $currentUserSid }
+            # COM ProductsEx uses an empty string for machine enumeration, as in
+            # Microsoft's WiLstPrdEx.vbs sample. PowerShell's COM binder rejects
+            # a null argument here. Explicit current SID restricts user queries.
+            $querySid = if ($context -eq 4) { [string]::Empty } else { $currentUserSid }
             $products = $null
             $count = 0
             try {
@@ -179,6 +180,11 @@ function Assert-Sentinel {
 }
 
 try {
+    # Fail fast on COM/API binding problems before three expensive MSI builds.
+    $preflight = [pscustomobject]@{ productCode = [guid]::NewGuid().ToString('B').ToUpperInvariant() }
+    Assert-ProductRegistration $preflight $false 'MSI registration API preflight'
+    Record-Pass 'MSI registration API preflight for current-user and machine contexts'
+
     $buildArgs = @{ FixtureId = $fixtureId; OutputDirectory = $OutputDirectory }
     if ($TargetFramework) { $buildArgs.TargetFramework = $TargetFramework }
     if ($RuntimeFrameworkVersion) { $buildArgs.RuntimeFrameworkVersion = $RuntimeFrameworkVersion }

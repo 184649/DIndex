@@ -113,7 +113,7 @@ Tests build synthetic versions `1.1.0`, `1.1.1`, `1.1.2` with one random fixture
 
 Only fixture builds include WiX’s `WixFailWhenDeferred` failure-injection action; it is excluded from ordinary MSI builds. Process checks use a tiny self-contained helper with the same EXE basename, which exits on its own after 45 seconds. There is no process kill. These tests do not prove that every real-app exit/save path works; that belongs in interactive acceptance.
 
-Product registration is queried through Windows Installer's supported `ProductsEx` API rather than assuming a particular uninstall registry path. Each installed fixture must have exactly one current-user unmanaged registration (context `2`), matching the current SID, `State=5` and `VersionString`; managed-user (`1`) and machine (`4`) registrations must be absent. The same API checks old/failed/uninstalled product absence. Query errors fail the test rather than being treated as absence. Context, state and version observations are logged and retained in the test-results manifest. These API checks do not replace the interactive Apps UI check below.
+Product registration is queried through Windows Installer's supported `ProductsEx` API rather than assuming a particular uninstall registry path. A fresh random ProductCode exercises all three context queries before fixture builds, so COM binding failures stop early. Machine enumeration passes an explicit empty SID string, following Microsoft's COM sample; user queries pass the current SID. Each installed fixture must have exactly one current-user unmanaged registration (context `2`), matching the current SID, `State=5` and `VersionString`; managed-user (`1`) and machine (`4`) registrations must be absent. The same API checks old/failed/uninstalled product absence. Query errors fail the test rather than being treated as absence. Context, state and version observations are logged and retained in the test-results manifest. These API checks do not replace the interactive Apps UI check below.
 
 Each MSI operation has a verbose log. `test-results-<GUID>.json` records passed checks or the first failure, plus whether the executing Windows token is an administrator. An administrator-run test explicitly records that real standard-user installation has not been established. Unexpected MSI exit codes print at most 80 relevant failure-log lines to CI, while preserving the complete local log. Fixture products are uninstalled in `finally`; any cleanup failure is reported. Test output and data sentinels are left for inspection and eventual disposable-environment removal. No upload, Release, signing, CI dispatch or user-computer installation is performed by either script.
 
@@ -123,6 +123,7 @@ Use a clean, supported Windows x64 VM with a standard user account and no separa
 
 ## Design references
 
+- [Official ProductsEx COM sample and empty machine SID](https://github.com/microsoft/Windows-classic-samples/blob/main/Samples/Win7Samples/sysmgmt/msi/scripts/WiLstPrdEx.vbs)
 - [Windows Installer ProductsEx enumeration](https://learn.microsoft.com/en-us/windows/win32/msi/installer-productsex)
 - [Product installation context](https://learn.microsoft.com/en-us/windows/win32/msi/product-context)
 - [Context-aware installation properties](https://learn.microsoft.com/en-us/windows/win32/msi/product-installproperty)

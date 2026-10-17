@@ -140,6 +140,14 @@ class PackagingContract(unittest.TestCase):
             self.assertIn(required, self.tests)
         self.assertNotIn("InstallProperty('ProductState')", self.tests)
 
+    def test_registration_api_preflight_precedes_builds(self):
+        self.assertIn("$querySid = if ($context -eq 4) { [string]::Empty }", self.tests)
+        self.assertNotIn("$querySid = if ($context -eq 4) { $null }", self.tests)
+        preflight = self.tests.index("Assert-ProductRegistration $preflight $false")
+        build = self.tests.index("$v1 = & (Join-Path $PSScriptRoot 'Build-Installer.ps1')")
+        self.assertLess(preflight, build)
+        self.assertIn("productCode = [guid]::NewGuid().ToString('B').ToUpperInvariant()", self.tests)
+
     def test_fixture_isolation_and_coverage(self):
         uuid.UUID(self.config["upgradeCode"])
         self.assertTrue(self.config["installFolder"].endswith("-Preview"))
