@@ -1,47 +1,67 @@
 # DIndex
 
-Windows向けの高速ファイル検索アプリです。
+Windows用ファイル名・パス検索アプリ。これは速度・信頼性改善の開発ブランチです。mainの配布ZIPとは別物です。
 
-## 主な機能
+## このブランチ
 
-- 初回起動はタスクトレイのみ
-- タスクトレイダブルクリック、またはメニューの「開く」で画面表示
-- 指定フォルダ配下をメモリ索引化して高速検索
-- FileSystemWatcher によるリアルタイム索引更新
-- 右クリックで「開く」「フォルダを開く」「パスをコピー」
-- GitHub main ブランチの `version.json` を確認して自動アップデート
-- 更新時は `DIndexUpdater.exe` が本体終了後に安全に置換
+検索snapshotの再利用、取消/世代管理、結果の一括表示、旧索引を保持する再構築、監視整合、cacheと設定の保存保護を改善しています。詳細と残件は [改善台帳](docs/IMPROVEMENT_LEDGER.md) を参照してください。
 
-## ビルド
+Everythingより速いという実測結果はありません。LinuxのC#コア検証・Windowsビルド・実機GUI検証は別の検証段階です。最終の検査結果は台帳に記録します。
 
-通常ビルド:
+## 必要なもの
 
-```bat
-build.bat
+- Windows 10/11 x64
+- ビルドにはMicrosoft公式 .NET 8 SDK
+- 通常ビルド版の実行には .NET 8 Desktop Runtime。self-contained配布版は不要
+
+## ソースから起動
+
+PowerShellで、既存作業フォルダーと別の場所へcloneします。
+
+```powershell
+git clone --branch improve/performance-reliability-20261017 --single-branch https://github.com/184649/DIndex.git DIndex-preview
+cd DIndex-preview
+dotnet build DIndex.sln -c Release --no-incremental
 ```
 
-配布用ビルド:
+最初の確認では通常のDIndex設定を使わず、専用のテストデータフォルダーと小さな検索rootを設定してください。下記は新規の一時フォルダーだけにファイルを作成します。
 
-```bat
-Build.bat
+```powershell
+$testHome = Join-Path $env:TEMP ('DIndex-preview-' + [guid]::NewGuid())
+$env:DINDEX_DATA_DIR = Join-Path $testHome 'profile'
+$testRoot = Join-Path $testHome 'files'
+New-Item -ItemType Directory -Path $env:DINDEX_DATA_DIR, $testRoot | Out-Null
+Set-Content -LiteralPath (Join-Path $testRoot 'notes-報告書.txt') -Value 'test'
+@{ SearchRoots=@($testRoot); SearchPath=$true; IncludeDirectories=$true; ResultLimit=500; ExcludeFolderNames=@('.git','node_modules','bin','obj') } |
+    ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $env:DINDEX_DATA_DIR 'settings.json') -Encoding utf8
+& '.\src\DIndex\bin\Release\net8.0-windows\DIndex.exe'
 ```
 
-## GitHub main に配置するファイル
+起動直後は画面を表示せず、タスクトレイに常駐します。隠れているアイコンも確認し、DIndexをダブルクリックして開いてください。ウィンドウを閉じても常駐します。終了はトレイの「終了」です。
 
-`Build.bat` 実行後、`release` フォルダ内の以下を GitHub の main ブランチ直下に配置してください。
+通常の保存先は `%LOCALAPPDATA%\DIndex` です。`DINDEX_DATA_DIR` はそのプロセスの保存先を明示的に変更します。上のPowerShellを閉じると子プロセス用設定は引き継がれなくなります。既存データへ切り替える前に正常なbackupを保管し、アプリを終了してください。
 
-```text
-DIndex.zip
-DIndexUpdater.zip
-version.json
-release-notes.json
+## 確認方法
+
+1. `notes`、`報告書`、空検索、パス/名前切替を試す。
+2. テストrootにファイルを追加し、rename・削除・subfolder移入が検索へ反映されることを確認する。
+3. 入力と再索引を連打して、古い結果が後から戻らないことを確認する。
+4. トレイ終了→再起動でcache読込、その後のバックグラウンド再整合を確認する。
+5. [Windows受入確認](docs/WINDOWS_ACCEPTANCE.md) の取消・破損・除外・リンク・高DPI・負荷試験を行う。
+
+実装を直接リンクする自動テスト:
+
+```powershell
+dotnet run --project tests/DIndex.Core.Tests/DIndex.Core.Tests.csproj -c Release
+dotnet run --project tests/StorageSafetyTests/StorageSafetyTests.csproj -c Release
 ```
 
-## 自動アップデートの流れ
+実行済み結果は改善台帳を参照してください。GUIで未確認の項目は完了扱いにしません。
 
-1. DIndex が `https://raw.githubusercontent.com/Chairman-bits/DIndex/main/version.json` を確認
-2. 新しいバージョンがあれば `DIndexUpdater.zip` を取得
-3. `DIndexUpdater.exe` が起動
-4. DIndex 本体を終了
-5. `DIndex.zip` から新しい `DIndex.exe` を取り出して置換
-6. DIndex を再起動
+## 配布用ビルドと更新
+
+既存の `build.bat` はバージョン指定・self-contained publish・ZIP作成という流れを維持しています。新しいversion manifestにはZIPのSHA-256を追加します。ハッシュのない旧manifestからの自動実行は拒否します。SHA-256は転送内容の整合性確認であり、署名や配布元の独立した認証の代わりではありません。
+
+開発版 `1.1.0-preview.1` は通常リリースからの自動更新対象外です。更新はbranchから再ビルドします。
+
+このブランチの検証でmainへの配置、Release公開、自動mergeは行いません。リポジトリ直下の既存 `DIndex.zip` と `DIndexUpdater.zip` は旧成果物なので、変更確認にはソースからビルドしたものを使ってください。

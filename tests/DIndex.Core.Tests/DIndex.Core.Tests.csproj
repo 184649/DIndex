@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/DIndex/FileIndexService.cs" Link="FileIndexService.cs" />
+    <Compile Include="../../src/DIndex/Models.cs" Link="Models.cs" />
+    <Compile Include="Program.cs" />
+    <Compile Include="ClipboardStub.cs" />
+  </ItemGroup>
+</Project>

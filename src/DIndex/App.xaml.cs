@@ -1,4 +1,6 @@
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using System.Windows.Threading;
 
 namespace DIndex;
@@ -6,6 +8,8 @@ namespace DIndex;
 public partial class App : System.Windows.Application
 {
     private MainWindow? _mainWindow;
+    private Mutex? _instanceMutex;
+    private bool _ownsMutex;
 
     protected override void OnStartup(System.Windows.StartupEventArgs e)
     {
@@ -14,11 +18,28 @@ public partial class App : System.Windows.Application
         base.OnStartup(e);
 
         ShutdownMode = System.Windows.ShutdownMode.OnExplicitShutdown;
+        var profileId = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(AppPaths.AppDataDirectory).ToUpperInvariant())));
+        _instanceMutex = new Mutex(false, "Local\\DIndex-" + profileId);
+        try { _ownsMutex = _instanceMutex.WaitOne(0); }
+        catch (AbandonedMutexException) { _ownsMutex = true; }
+        if (!_ownsMutex)
+        {
+            System.Windows.MessageBox.Show("このデータフォルダーを使うDIndexは既に起動しています。タスクトレイから開いてください。", "DIndex");
+            Shutdown();
+            return;
+        }
         Directory.CreateDirectory(AppPaths.AppDataDirectory);
 
         _mainWindow = new MainWindow();
         MainWindow = _mainWindow;
         _mainWindow.Hide();
+    }
+
+    protected override void OnExit(System.Windows.ExitEventArgs e)
+    {
+        if (_ownsMutex) _instanceMutex?.ReleaseMutex();
+        _instanceMutex?.Dispose();
+        base.OnExit(e);
     }
 
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
@@ -51,3 +72,4 @@ internal static class ErrorLogger
         }
     }
 }
+

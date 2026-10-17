@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <StartupObject>StorageSafetyTests.Program</StartupObject>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/DIndex/AppPaths.cs" Link="Source/AppPaths.cs" />
+    <Compile Include="../../src/DIndex/Models.cs" Link="Source/Models.cs" />
+    <Compile Include="../../src/DIndex/AtomicFileStorage.cs" Link="Source/AtomicFileStorage.cs" />
+    <Compile Include="../../src/DIndex/IndexCacheService.cs" Link="Source/IndexCacheService.cs" />
+    <Compile Include="../../src/DIndex/SettingsRepository.cs" Link="Source/SettingsRepository.cs" />
+    <Compile Include="../../src/DIndex/UpdateService.cs" Link="Source/UpdateService.cs" />
+    <Compile Include="../../src/Shared/UpdatePackageSafety.cs" Link="Source/UpdatePackageSafety.cs" />
+    <Compile Include="../../src/DIndexUpdater/Program.cs" Link="Source/UpdaterProgram.cs" />
+  </ItemGroup>
+</Project>

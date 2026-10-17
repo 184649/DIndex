@@ -79,7 +79,7 @@
                 </Grid>
             </Border>
 
-            <DataGrid Grid.Column="2" Name="ResultsGrid" AutoGenerateColumns="False" IsReadOnly="True" AlternationCount="2" SelectionMode="Single" MouseDoubleClick="ResultsGrid_MouseDoubleClick">
+            <DataGrid Grid.Column="2" Name="ResultsGrid" EnableRowVirtualization="True" EnableColumnVirtualization="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" AutoGenerateColumns="False" IsReadOnly="True" AlternationCount="2" SelectionMode="Single" MouseDoubleClick="ResultsGrid_MouseDoubleClick">
                 <DataGrid.ContextMenu>
                     <ContextMenu>
                         <MenuItem Header="開く" Click="OpenSelectedMenu_Click"/>
@@ -110,3 +110,4 @@
         </Border>
     </Grid>
 </Window>
+

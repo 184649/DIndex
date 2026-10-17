@@ -121,7 +121,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$updater='%UPDATER_ZIP_URL%';" ^
   "$notes='%NOTES_URL%';" ^
   "$release='%RELEASE_DIR%';" ^
-  "$obj=[ordered]@{ version=$version; downloadUrl=$app; updaterUrl=$updater; releaseNotes=$notes };" ^
+  "$obj=[ordered]@{ version=$version; downloadUrl=$app; updaterUrl=$updater; downloadSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $release 'DIndex.zip')).Hash; updaterSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $release 'DIndexUpdater.zip')).Hash; releaseNotes=$notes };" ^
   "$json=$obj | ConvertTo-Json -Depth 5;" ^
   "Set-Content -Path (Join-Path $release 'version.json') -Value $json -Encoding UTF8;" ^
   "$notesObj=[ordered]@{ version=$version; notes=@('DIndex v' + $version) };" ^
@@ -146,3 +146,4 @@ echo   release\release-notes.json
 echo.
 pause
 exit /b 0
+

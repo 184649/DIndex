@@ -1,40 +1,52 @@
 using System.Diagnostics;
 using System.IO;
-using System.IO.Compression;
 using System.Net.Http;
 using System.Reflection;
 using System.Text.Json;
+using DIndex.Updating;
 
 namespace DIndex;
 
 public sealed class UpdateService
 {
     private const string VersionUrl = "https://raw.githubusercontent.com/Chairman-bits/DIndex/main/version.json";
-    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
+    private static readonly HttpClient Http = new(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
+    private readonly SemaphoreSlim _updateGate = new(1, 1);
+    private bool _updateStarted;
+
+    public bool IsPreviewBuild => Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Contains("-preview", StringComparison.OrdinalIgnoreCase) == true;
 
     public string CurrentVersion => NormalizeVersion(Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "1.0.0");
 
     public async Task<(bool HasUpdate, UpdateInfo? Info, string Message)> CheckAsync(CancellationToken cancellationToken)
     {
+        if (IsPreviewBuild) return (false, null, "開発版は自動更新の対象外です。このブランチから再ビルドして更新してください。");
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(30));
+        var readToken = timeout.Token;
         try
         {
-            var json = await Http.GetStringAsync(VersionUrl, cancellationToken);
-            var info = JsonSerializer.Deserialize<UpdateInfo>(json, JsonOptions);
-            if (info is null || string.IsNullOrWhiteSpace(info.Version))
+            using var response = await Http.GetAsync(VersionUrl, HttpCompletionOption.ResponseHeadersRead, readToken);
+            response.EnsureSuccessStatusCode();
+            if (response.Content.Headers.ContentLength > 128 * 1024) throw new InvalidDataException("更新情報が大きすぎます。");
+            // A bounded stream also handles responses without Content-Length.
+            await using var input = await response.Content.ReadAsStreamAsync(readToken);
+            using var data = new MemoryStream();
+            var buffer = new byte[8192];
+            int read;
+            while ((read = await input.ReadAsync(buffer, readToken)) != 0)
             {
-                return (false, null, "version.json を読み取れませんでした。");
+                if (data.Length + read > 128 * 1024) throw new InvalidDataException("更新情報が大きすぎます。");
+                data.Write(buffer, 0, read);
             }
-
-            var current = new Version(CurrentVersion);
-            var latest = new Version(NormalizeVersion(info.Version));
-            if (latest > current)
-            {
-                return (true, info, $"新しいバージョン {info.Version} があります。");
-            }
-
+            var info = DeserializeManifest(data.ToArray());
+            if (info is null || !Version.TryParse(NormalizeVersion(info.Version), out var latest))
+                return (false, null, "version.json のバージョンを読み取れませんでした。");
+            if (latest > new Version(CurrentVersion)) return (true, info, $"新しいバージョン {info.Version} があります。");
             return (false, info, $"最新です。現在: {CurrentVersion}");
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
             ErrorLogger.Write(ex);
@@ -44,60 +56,76 @@ public sealed class UpdateService
 
     public async Task<bool> StartUpdateAsync(UpdateInfo info, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(info.DownloadUrl) || string.IsNullOrWhiteSpace(info.UpdaterUrl))
-        {
-            System.Windows.MessageBox.Show("version.json に downloadUrl / updaterUrl がありません。", "DIndex", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
-            return false;
-        }
-
+        ArgumentNullException.ThrowIfNull(info);
+        if (!await _updateGate.WaitAsync(0, cancellationToken)) return false;
+        string? workDirectory = null;
+        var launched = false;
         try
         {
-            Directory.CreateDirectory(AppPaths.UpdateWorkDirectory);
-            var updaterZip = Path.Combine(AppPaths.UpdateWorkDirectory, "DIndexUpdater.zip");
-            var updaterDir = Path.Combine(AppPaths.UpdateWorkDirectory, "updater");
-            if (Directory.Exists(updaterDir)) Directory.Delete(updaterDir, true);
-            Directory.CreateDirectory(updaterDir);
+            if (_updateStarted) return false;
+            if (IsPreviewBuild) throw new InvalidOperationException("開発版は自動更新の対象外です。このブランチから再ビルドして更新してください。");
+            UpdatePackageSafety.ValidatePackageUrl(info.DownloadUrl);
+            UpdatePackageSafety.ValidatePackageUrl(info.UpdaterUrl);
+            UpdatePackageSafety.ValidateHash(info.DownloadSha256);
+            UpdatePackageSafety.ValidateHash(info.UpdaterSha256);
+            var appExe = Path.GetFullPath(Environment.ProcessPath ?? throw new InvalidOperationException("実行中のアプリのパスが見つかりません。"));
+            if (!Path.GetFileName(appExe).Equals("DIndex.exe", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("自動更新は配布版 DIndex.exe から実行してください。");
+            var appDirectory = Path.GetDirectoryName(appExe)!;
+            if (File.Exists(Path.Combine(appDirectory, "DIndex.dll")) || File.Exists(Path.Combine(appDirectory, "DIndex.runtimeconfig.json")))
+                throw new InvalidOperationException("この起動方法は開発用ビルドです。自動更新は単一 EXE の配布版のみ対応しています。手動でビルドまたは更新してください。");
+            // Fail before closing the application if its installation directory is read-only.
+            var probe = Path.Combine(appDirectory, $".dindex-write-test-{Guid.NewGuid():N}");
+            using (new FileStream(probe, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose)) { }
 
-            await DownloadFileAsync(info.UpdaterUrl, updaterZip, cancellationToken);
-            ZipFile.ExtractToDirectory(updaterZip, updaterDir, true);
-
-            var updaterExe = Directory.EnumerateFiles(updaterDir, "DIndexUpdater.exe", SearchOption.AllDirectories).FirstOrDefault();
-            if (string.IsNullOrWhiteSpace(updaterExe) || !File.Exists(updaterExe))
-            {
-                System.Windows.MessageBox.Show("DIndexUpdater.exe が見つかりません。", "DIndex", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
-                return false;
-            }
-
-            var appExe = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName ?? Path.Combine(System.AppContext.BaseDirectory, "DIndex.exe");
-            var args = $"--processId {Environment.ProcessId} --appPath \"{appExe}\" --appZip \"{info.DownloadUrl}\" --restart";
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = updaterExe,
-                Arguments = args,
-                UseShellExecute = true,
-                WorkingDirectory = Path.GetDirectoryName(updaterExe) ?? updaterDir
-            });
+            workDirectory = Path.Combine(AppPaths.UpdateWorkDirectory, Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(workDirectory);
+            var updaterZip = Path.Combine(workDirectory, "DIndexUpdater.zip");
+            var appZip = Path.Combine(workDirectory, "DIndex.zip");
+            // Download and validate both packages while DIndex is still running.
+            await UpdatePackageSafety.DownloadVerifiedAsync(info.UpdaterUrl, updaterZip, info.UpdaterSha256, cancellationToken);
+            await UpdatePackageSafety.DownloadVerifiedAsync(info.DownloadUrl, appZip, info.DownloadSha256, cancellationToken);
+            var updaterDirectory = Path.Combine(workDirectory, "updater");
+            var updaterExe = await UpdatePackageSafety.ExtractExecutableAsync(updaterZip, updaterDirectory, "DIndexUpdater.exe", cancellationToken);
+            await UpdatePackageSafety.ExtractExecutableAsync(appZip, Path.Combine(workDirectory, "app-check"), "DIndex.exe", cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            var startInfo = new ProcessStartInfo { FileName = updaterExe, UseShellExecute = false, WorkingDirectory = updaterDirectory };
+            foreach (var argument in new[] { "--processId", Environment.ProcessId.ToString(), "--appPath", appExe, "--appZipPath", appZip,
+                         "--appSha256", info.DownloadSha256, "--restart" }) startInfo.ArgumentList.Add(argument);
+            using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("更新プログラムを起動できませんでした。");
+            launched = true;
+            _updateStarted = true;
             return true;
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
             ErrorLogger.Write(ex);
-            System.Windows.MessageBox.Show(ex.ToString(), "DIndex Update Error", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
+            System.Windows.MessageBox.Show(ex.Message, "DIndex Update Error", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
             return false;
+        }
+        finally
+        {
+            if (!launched && workDirectory is not null)
+            {
+                try { Directory.Delete(workDirectory, true); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+            _updateGate.Release();
         }
     }
 
-    private static async Task DownloadFileAsync(string url, string path, CancellationToken cancellationToken)
+    internal static UpdateInfo? DeserializeManifest(byte[] bytes)
     {
-        await using var input = await Http.GetStreamAsync(url, cancellationToken);
-        await using var output = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 128, true);
-        await input.CopyToAsync(output, cancellationToken);
+        ReadOnlySpan<byte> json = bytes;
+        if (json.Length >= 3 && json[0] == 0xef && json[1] == 0xbb && json[2] == 0xbf) json = json[3..];
+        return JsonSerializer.Deserialize<UpdateInfo>(json, JsonOptions);
     }
 
     private static string NormalizeVersion(string value)
     {
-        var parts = value.Split('.', StringSplitOptions.RemoveEmptyEntries).Take(3).ToList();
-        while (parts.Count < 3) parts.Add("0");
-        return string.Join('.', parts);
+        if (!Version.TryParse(value, out var version)) return string.Empty;
+        return $"{version.Major}.{version.Minor}.{Math.Max(0, version.Build)}";
     }
 }

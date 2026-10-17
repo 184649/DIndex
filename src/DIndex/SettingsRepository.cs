@@ -1,53 +1,126 @@
 using System.IO;
+using System.Text;
 using System.Text.Json;
 
 namespace DIndex;
 
 public sealed class SettingsRepository
 {
-    private static readonly JsonSerializerOptions Options = new()
-    {
-        WriteIndented = true,
-        PropertyNameCaseInsensitive = true
-    };
+    private static readonly JsonSerializerOptions Options = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
+    private readonly string _settingsPath;
+
+    public SettingsRepository(string? settingsPath = null) => _settingsPath = Path.GetFullPath(settingsPath ?? AppPaths.SettingsPath);
+    public string? LastLoadWarning { get; private set; }
 
     public AppSettings Load()
     {
+        var gate = AtomicFileStorage.GateFor(_settingsPath);
+        gate.Wait();
         try
         {
-            Directory.CreateDirectory(AppPaths.AppDataDirectory);
-            if (!File.Exists(AppPaths.SettingsPath))
+            LastLoadWarning = null;
+            Exception? primaryError = null;
+            if (File.Exists(_settingsPath))
             {
-                var defaultSettings = CreateDefault();
-                Save(defaultSettings);
-                return defaultSettings;
+                try { return ReadSettings(_settingsPath); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
+                {
+                    primaryError = ex;
+                    ErrorLogger.Write(ex);
+                }
             }
-
-            var json = File.ReadAllText(AppPaths.SettingsPath);
-            var settings = JsonSerializer.Deserialize<AppSettings>(json, Options) ?? CreateDefault();
-            if (settings.SearchRoots.Count == 0)
+            if (File.Exists(_settingsPath + ".bak"))
             {
-                settings.SearchRoots = CreateDefaultRoots();
+                try
+                {
+                    var settings = ReadSettings(_settingsPath + ".bak");
+                    if (File.Exists(_settingsPath)) PreserveCorruptFile(_settingsPath);
+                    AtomicFileStorage.RestoreBackup(_settingsPath);
+                    LastLoadWarning = "設定をバックアップから復元しました。";
+                    return settings;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
+                {
+                    primaryError ??= ex;
+                    ErrorLogger.Write(ex);
+                }
             }
-            return settings;
+            if (primaryError is not null)
+                LastLoadWarning = "設定を読み込めないため既定値を使用します。設定ファイルとバックアップを確認してください。";
+            // Do not overwrite corrupt or inaccessible user settings while merely loading them.
+            return primaryError is null ? CreateDefault() : new AppSettings { SearchRoots = new List<string>() };
         }
-        catch
-        {
-            return CreateDefault();
-        }
+        finally { gate.Release(); }
     }
 
     public void Save(AppSettings settings)
     {
-        Directory.CreateDirectory(AppPaths.AppDataDirectory);
+        ArgumentNullException.ThrowIfNull(settings);
+        Validate(settings);
         var json = JsonSerializer.Serialize(settings, Options);
-        File.WriteAllText(AppPaths.SettingsPath, json);
+        var gate = AtomicFileStorage.GateFor(_settingsPath);
+        gate.Wait();
+        string? temporary = null;
+        try
+        {
+            temporary = AtomicFileStorage.CreateTemporaryPath(_settingsPath);
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                using (var writer = new StreamWriter(stream, new UTF8Encoding(false), 4096, leaveOpen: true)) writer.Write(json);
+                stream.Flush(flushToDisk: true);
+            }
+            // Preserve a known-good backup when the user explicitly saves after recovering from corrupt JSON.
+            var keepBackup = true;
+            if (File.Exists(_settingsPath))
+            {
+                try { _ = ReadSettings(_settingsPath); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
+                {
+                    PreserveCorruptFile(_settingsPath);
+                    keepBackup = false;
+                }
+            }
+            if (keepBackup && File.Exists(_settingsPath + ".bak"))
+            {
+                try { _ = ReadSettings(_settingsPath + ".bak"); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
+                {
+                    PreserveCorruptFile(_settingsPath + ".bak");
+                }
+            }
+            AtomicFileStorage.Commit(temporary, _settingsPath, keepBackup);
+        }
+        finally
+        {
+            if (temporary is not null) AtomicFileStorage.DeleteTemporary(temporary);
+            gate.Release();
+        }
     }
 
-    private static AppSettings CreateDefault()
+    private static void PreserveCorruptFile(string path)
     {
-        return new AppSettings { SearchRoots = CreateDefaultRoots() };
+        // A load failure must not turn the next preference edit into irreversible data loss.
+        var archive = path + $".corrupt-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}";
+        File.Copy(path, archive, overwrite: false);
     }
+
+    private static AppSettings ReadSettings(string path)
+    {
+        var settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path), Options) ?? throw new InvalidDataException("設定が空です。");
+        Validate(settings);
+        settings.SearchRoots = settings.SearchRoots.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        settings.ExcludeFolderNames = settings.ExcludeFolderNames.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        return settings;
+    }
+
+    private static void Validate(AppSettings settings)
+    {
+        if (settings.SearchRoots is null || settings.ExcludeFolderNames is null || settings.SearchRoots.Any(string.IsNullOrWhiteSpace) ||
+            settings.ExcludeFolderNames.Any(string.IsNullOrWhiteSpace) || settings.ResultLimit < 1 || settings.ResultLimit > 100_000)
+            throw new InvalidDataException("設定の検索フォルダ、除外名、または表示件数が不正です。表示件数は 1～100,000 にしてください。");
+    }
+
+    private static AppSettings CreateDefault() => new() { SearchRoots = CreateDefaultRoots() };
 
     private static List<string> CreateDefaultRoots()
     {
@@ -58,7 +131,6 @@ public sealed class SettingsRepository
             var path = Path.Combine(userProfile, name);
             if (Directory.Exists(path)) roots.Add(path);
         }
-
         if (roots.Count == 0 && Directory.Exists(userProfile)) roots.Add(userProfile);
         return roots.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }

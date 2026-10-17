@@ -27,7 +27,7 @@ public sealed class SearchRecord
     public string FullPathLower { get; init; } = string.Empty;
 
     [JsonIgnore]
-    public DateTime Updated => UpdatedTicks <= 0 ? DateTime.MinValue : new DateTime(UpdatedTicks);
+    public DateTime Updated => UpdatedTicks <= 0 ? DateTime.MinValue : new DateTime(Math.Min(UpdatedTicks, DateTime.MaxValue.Ticks));
 
     public static SearchRecord FromFile(string path)
     {
@@ -125,4 +125,7 @@ public sealed class UpdateInfo
     public string DownloadUrl { get; set; } = string.Empty;
     public string UpdaterUrl { get; set; } = string.Empty;
     public string ReleaseNotes { get; set; } = string.Empty;
+    public string DownloadSha256 { get; set; } = string.Empty;
+    public string UpdaterSha256 { get; set; } = string.Empty;
 }
+

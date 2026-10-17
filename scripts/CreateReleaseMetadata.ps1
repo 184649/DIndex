@@ -13,6 +13,8 @@ $versionObj = [ordered]@{
     version = $Version
     downloadUrl = $DownloadUrl
     updaterUrl = $UpdaterUrl
+    downloadSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $ReleaseDir 'DIndex.zip')).Hash
+    updaterSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $ReleaseDir 'DIndexUpdater.zip')).Hash
     releaseNotes = $ReleaseNotesUrl
 }
 $versionObj | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $ReleaseDir 'version.json') -Encoding UTF8
@@ -28,3 +30,4 @@ $notesObj = [ordered]@{
     )
 }
 $notesObj | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $ReleaseDir 'release-notes.json') -Encoding UTF8
+
