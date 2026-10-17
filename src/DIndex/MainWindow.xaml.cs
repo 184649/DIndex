@@ -248,7 +248,10 @@ public partial class MainWindow : System.Windows.Window
             sw.Stop();
             ResultCountText.Text = $"表示 {items.Length:N0} 件（上限 {limit:N0}）";
             Interlocked.Exchange(ref _pendingStatus, null);
-            StatusText.Text = $"検索完了: {items.Length:N0} 件 / {sw.ElapsedMilliseconds} ms / 索引 {_indexService.Count:N0} 件" + (snapshotAdvanced ? " / 索引更新中（表示を再確認します）" : _indexService.IsDirty ? " / 要再整合" : string.Empty);
+            StatusText.Text = $"検索: {items.Length:N0} 件 / {sw.ElapsedMilliseconds} ms / 検索可能な索引 {_indexService.Count:N0} 件"
+                + (_indexService.IsRebuilding ? " / 索引作成中・途中結果です（未走査のファイルはまだ含まれません）"
+                    : snapshotAdvanced ? " / 索引更新中（表示を再確認します）"
+                    : _indexService.IsDirty ? " / 要再整合" : " / 完了");
         }
         catch (OperationCanceledException)
         {

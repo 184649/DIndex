@@ -19,6 +19,16 @@ internal static class Program
             ("bounded recent cache preserves limits, ties, cancellation and generations", EmptyCacheTests.Run),
             ("cached records are filtered by current settings", CacheScope),
             ("single-root traversal covers all descendants", Traversal),
+            ("bounded previews are searchable before scan completion and reconcile changes", ProgressiveIndexTests.SearchableBeforeCompletion),
+            ("canceling a preview restores the prior snapshot", ProgressiveIndexTests.CancelRestoresBaseline),
+            ("superseded previews cannot overwrite or leak old scope", ProgressiveIndexTests.SupersededPreviewAndScope),
+            ("same-scope queued cancellation never promotes an old partial preview", ProgressiveIndexTests.SupersededSameScopeCancellation),
+            ("previews preserve unreadable fallback and enforce exclusions", ProgressiveIndexTests.UnreadableFallbackAndScope),
+            ("active watcher updates cannot replace previews and survive cancellation", ProgressiveIndexTests.ActiveWatcherCannotReplacePreview),
+            ("failed preview generation restores its safe baseline", ProgressiveIndexTests.FailedScanRestoresBaseline),
+            ("canceled async cache supersession cannot strand a preview", ProgressiveIndexTests.CanceledCacheSupersedesPreview),
+            ("unchanged scope skips previews and keeps its old watcher live", ProgressiveIndexTests.SameScopeBaselineKeepsWatcherLive),
+            ("expanded scope still reveals new-root results early", ProgressiveIndexTests.ExpandedScopeStillPublishesEarly),
             ("excluded ancestors and reparse cycles", ExclusionsAndLinks),
             ("canceled rebuild preserves old searchable snapshot", CanceledRebuild),
             ("new generation wins over delayed old workers", OverlappingRebuilds),
@@ -154,7 +164,7 @@ internal static class Program
         await service.RebuildAsync(tree.Settings(), null, CancellationToken.None);
         var expected = Directory.EnumerateFileSystemEntries(tree.Root, "*", SearchOption.AllDirectories).Append(tree.Root).Order().ToArray();
         Equal(expected, service.Snapshot().Select(x => x.FullPath).Order(), "all descendants");
-        Assert(counts == 1, "No per-file count notification storm");
+        Assert(counts >= 1 && counts <= 5, "Only throttled geometric previews plus final count notification");
         var active = GetActive(service);
         var peak = (int)active.GetType().GetProperty("PeakWorkerCount")!.GetValue(active)!;
         Assert(peak > 1, $"A single root must actually keep multiple traversal workers active (peak={peak})");

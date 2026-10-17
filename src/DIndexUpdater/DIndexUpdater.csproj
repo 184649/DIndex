@@ -8,9 +8,9 @@
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <AssemblyName>DIndexUpdater</AssemblyName>
     <RootNamespace>DIndexUpdater</RootNamespace>
-    <Version>1.1.0-preview.1</Version>
-    <AssemblyVersion>1.1.0.0</AssemblyVersion>
-    <FileVersion>1.1.0.0</FileVersion>
+    <Version>1.1.1-preview.1</Version>
+    <AssemblyVersion>1.1.1.0</AssemblyVersion>
+    <FileVersion>1.1.1.0</FileVersion>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\Shared\UpdatePackageSafety.cs" Link="UpdatePackageSafety.cs" />

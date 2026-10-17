@@ -13,7 +13,7 @@ ref=sorted((sdk/'packs/Microsoft.NETCore.App.Ref').glob('*/ref/net8.0'))[-1]
 args=['-nologo','-target:exe','-langversion:12','-nullable:enable','-optimize+','-out:'+str(out/'DIndex.Core.Tests.dll')]
 args+=['-r:'+str(p) for p in sorted(ref.glob('*.dll'))]
 args += [str(r/'src/DIndex'/p) for p in ['FileIndexService.cs','Models.cs']]
-args += [str(r/'tests/DIndex.Core.Tests'/p) for p in ['GlobalUsings.cs','ClipboardStub.cs','Program.cs','EmptyCacheTests.cs']]
+args += [str(r/'tests/DIndex.Core.Tests'/p) for p in ['GlobalUsings.cs','ClipboardStub.cs','Program.cs','EmptyCacheTests.cs','ProgressiveIndexTests.cs']]
 (out/'compile.rsp').write_text('\n'.join(args)+'\n')
 (out/'DIndex.Core.Tests.runtimeconfig.json').write_text(json.dumps({'runtimeOptions':{'tfm':'net8.0','framework':{'name':'Microsoft.NETCore.App','version':'8.0.0'}}}))
 PY

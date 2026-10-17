@@ -60,7 +60,7 @@ try {
     Write-Host 'MSI と .NET 同梱のプレビューを作成しています。MSI の実行やアプリの起動は行いません。'
     $buildParameters = @{
         TargetFramework = 'net10.0-windows'
-        PackageVersion = '1.1.0'
+        PackageVersion = '1.1.1'
         OutputDirectory = $buildDirectory
         WixBin = $resolvedWix
     }

@@ -14,6 +14,9 @@ public sealed class FileIndexService : IDisposable
 {
     private const int MaximumPendingPaths = 8192;
     private const int MaximumBatchPaths = 512;
+    private const int FirstPreviewMaximumRecords = 512;
+    private static readonly TimeSpan FirstPreviewInterval = TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan PreviewInterval = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan UpdateInterval = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan HealthInterval = TimeSpan.FromSeconds(5);
     private readonly object _gate = new();
@@ -33,7 +36,7 @@ public sealed class FileIndexService : IDisposable
     public int Count => Volatile.Read(ref _snapshot).Records.Length;
     public long RequestVersion => Volatile.Read(ref _requestVersion);
     public long SnapshotVersion => Volatile.Read(ref _snapshot).Version;
-    public bool IsDirty => Volatile.Read(ref _cachedOnly) != 0 || Volatile.Read(ref _active)?.IsDirty == true;
+    public bool IsDirty => IsRebuilding || Volatile.Read(ref _snapshot).IsPartial || Volatile.Read(ref _cachedOnly) != 0 || Volatile.Read(ref _active)?.IsDirty == true;
     public bool IsRebuilding => Volatile.Read(ref _building) is not null;
     public event Action<int>? CountChanged;
     public event Action<string>? StatusChanged;
@@ -88,6 +91,7 @@ public sealed class FileIndexService : IDisposable
         var configuration = IndexConfiguration.Create(settings);
         long requestVersion;
         IndexSession? building;
+        PublishedSnapshot? restored = null;
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
@@ -95,8 +99,16 @@ public sealed class FileIndexService : IDisposable
             requestVersion = ++_requestVersion;
             building = _building;
             _building = null;
+            if (_snapshot.IsPartial && building is not null)
+            {
+                // Cache preparation may itself cancel/fail: keep its predecessor's safe baseline,
+                // not a preview whose generation is about to be canceled.
+                restored = new PublishedSnapshot(building.RetainedSnapshot.Records, ++_nextVersion);
+                Volatile.Write(ref _snapshot, restored);
+            }
         }
         building?.Dispose();
+        if (restored is not null) NotifyPublished(restored);
         return Task.Run(() =>
         {
             var items = new Dictionary<string, SearchRecord>(StringComparer.OrdinalIgnoreCase);
@@ -150,7 +162,8 @@ public sealed class FileIndexService : IDisposable
             if (expectedActive is not null && (!ReferenceEquals(_active, expectedActive) || _building is not null))
                 return Task.CompletedTask;
             previousBuild = _building;
-            if (_snapshotConfiguration is null || !_snapshotConfiguration.SameScope(configuration))
+            var scopeChanged = _snapshotConfiguration is null || !_snapshotConfiguration.SameScope(configuration);
+            if (scopeChanged)
             {
                 // Scope changes must hide removed paths immediately without filtering millions
                 // of entries on the UI thread. Restore only the allowed subset off-thread below.
@@ -166,7 +179,20 @@ public sealed class FileIndexService : IDisposable
                 }
             }
             ++_requestVersion;
-            session = new IndexSession(configuration, CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token), cancellationToken);
+            // A superseding same-scope request retains the verified/cached baseline, not the
+            // previous request's preview. Cancellation must never promote a partial scan.
+            var retainedSnapshot = _snapshot.IsPartial && previousBuild is not null
+                ? previousBuild.RetainedSnapshot : _snapshot;
+            // A same-scope baseline already supplies immediate results. Avoid copying a large
+            // cache just to expose a small preview; its active watcher stays live until commit.
+            var canPublishPreviews = scopeChanged || retainedSnapshot.Records.Length == 0;
+            if (!canPublishPreviews && _snapshot.IsPartial)
+            {
+                safeSnapshot = new PublishedSnapshot(retainedSnapshot.Records, ++_nextVersion);
+                Volatile.Write(ref _snapshot, safeSnapshot);
+            }
+            session = new IndexSession(configuration, CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token),
+                cancellationToken, retainedSnapshot, canPublishPreviews);
             _building = session;
         }
         previousBuild?.Dispose();
@@ -198,6 +224,7 @@ public sealed class FileIndexService : IDisposable
                     if (!_disposed && ReferenceEquals(_building, session) && _active is null)
                     {
                         retained = new PublishedSnapshot(allowed, ++_nextVersion);
+                        session.RetainedSnapshot = retained;
                         Volatile.Write(ref _snapshot, retained);
                     }
                 }
@@ -210,7 +237,10 @@ public sealed class FileIndexService : IDisposable
             token.ThrowIfCancellationRequested();
             // Subscribe before enumeration so writes during the initial scan are replayed.
             ConfigureWatchers(session);
-            await ScanAsync(session, session.Configuration.Roots, session.Items, progress, token).ConfigureAwait(false);
+            var scan = ScanAsync(session, session.Configuration.Roots, session.Items, progress, token);
+            if (session.CanPublishPreviews)
+                await Task.WhenAll(scan, PublishPreviewsAsync(session, scan, token)).ConfigureAwait(false);
+            else await scan.ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             PreserveUnreadableRecords(session);
             await ApplyPendingBatchAsync(session, token).ConfigureAwait(false);
@@ -231,6 +261,8 @@ public sealed class FileIndexService : IDisposable
                 snapshot = new PublishedSnapshot(records, ++_nextVersion);
                 Volatile.Write(ref _snapshot, snapshot);
                 session.MarkPublished();
+                // The committed session no longer needs to retain an older generation for rollback.
+                session.RetainedSnapshot = new PublishedSnapshot(Array.Empty<SearchRecord>(), 0);
                 committed = true;
                 if (!session.IsDirty)
                 {
@@ -250,14 +282,81 @@ public sealed class FileIndexService : IDisposable
             if (entered) _buildGate.Release();
             if (!committed)
             {
+                PublishedSnapshot? restored = null;
                 lock (_gate)
                 {
-                    if (ReferenceEquals(_building, session)) _building = null;
+                    if (ReferenceEquals(_building, session))
+                    {
+                        _building = null;
+                        if (_snapshot.IsPartial)
+                        {
+                            restored = new PublishedSnapshot(session.RetainedSnapshot.Records, ++_nextVersion);
+                            Volatile.Write(ref _snapshot, restored);
+                        }
+                    }
                 }
+                if (restored is not null) NotifyPublished(restored);
                 session.Dispose();
                 session.ReleaseCancellation();
             }
         }
+    }
+
+    private async Task PublishPreviewsAsync(IndexSession session, Task scan, CancellationToken token)
+    {
+        var interval = FirstPreviewInterval;
+        long nextCount = 1;
+        var first = true;
+        while (true)
+        {
+            // The scan can finish while an I/O-bound directory worker is blocked. A separate
+            // publisher also makes discovered files searchable during one very large directory.
+            await Task.WhenAny(scan, Task.Delay(interval, token)).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            if (scan.IsCompleted) return;
+            if (session.Items.Count < nextCount) continue;
+            var discovered = CopyRecords(session.Items, token, first ? FirstPreviewMaximumRecords : int.MaxValue);
+            if (discovered.Length == 0) continue;
+            var records = MergePreview(session.RetainedSnapshot.Records, discovered, token);
+            PublishedSnapshot preview;
+            lock (_gate)
+            {
+                token.ThrowIfCancellationRequested();
+                if (_disposed || !ReferenceEquals(_building, session)) return;
+                preview = new PublishedSnapshot(records, ++_nextVersion, isPartial: true);
+                Volatile.Write(ref _snapshot, preview);
+            }
+            NotifyPublished(preview);
+            // Geometric growth bounds aggregate copying to O(existing + scanned), rather than
+            // copying a million records on every progress tick. After the first bounded preview,
+            // publish all discovered entries at most once a second and only after doubling.
+            // A slow tail below the next threshold appears in the final reconciled snapshot.
+            nextCount = Math.Max(FirstPreviewMaximumRecords, 2L * Math.Max(discovered.Length, session.RetainedSnapshot.Records.Length));
+            first = false;
+            interval = PreviewInterval;
+        }
+    }
+
+    private static SearchRecord[] MergePreview(SearchRecord[] retained, SearchRecord[] discovered, CancellationToken token)
+    {
+        if (retained.Length == 0) return discovered;
+        var fresh = new Dictionary<string, SearchRecord>(discovered.Length, StringComparer.OrdinalIgnoreCase);
+        foreach (var record in discovered)
+        {
+            token.ThrowIfCancellationRequested();
+            fresh[record.FullPath] = record;
+        }
+        var result = new SearchRecord[retained.Length + fresh.Count];
+        var i = 0;
+        foreach (var record in retained)
+        {
+            token.ThrowIfCancellationRequested();
+            result[i++] = fresh.Remove(record.FullPath, out var replacement) ? replacement : record;
+        }
+        foreach (var record in fresh.Values) result[i++] = record;
+        if (i != result.Length) Array.Resize(ref result, i);
+        token.ThrowIfCancellationRequested();
+        return result;
     }
 
     public List<SearchRecord> Search(string keyword, bool pathSearch, int limit, CancellationToken cancellationToken)
@@ -501,7 +600,7 @@ public sealed class FileIndexService : IDisposable
                 try
                 {
                     var changed = await ApplyPendingBatchAsync(session, token).ConfigureAwait(false);
-                    if (changed) PublishUpdates(session, token);
+                    if (changed || session.HasUnpublishedChanges) PublishUpdates(session, token);
                     if (DateTime.UtcNow >= nextHealth)
                     {
                         session.CheckRoots();
@@ -573,11 +672,17 @@ public sealed class FileIndexService : IDisposable
 
     private void PublishUpdates(IndexSession session, CancellationToken token)
     {
+        // Keep processing the old watcher's changes, but never let it replace the rebuild's
+        // preview. Its unpublished flag makes the pump retry if that rebuild is canceled.
+        lock (_gate)
+        {
+            if (_disposed || !ReferenceEquals(_active, session) || _building?.CanPublishPreviews == true || token.IsCancellationRequested) return;
+        }
         var records = CopyRecords(session.Items, token);
         PublishedSnapshot snapshot;
         lock (_gate)
         {
-            if (_disposed || !ReferenceEquals(_active, session) || token.IsCancellationRequested) return;
+            if (_disposed || !ReferenceEquals(_active, session) || _building?.CanPublishPreviews == true || token.IsCancellationRequested) return;
             snapshot = new PublishedSnapshot(records, ++_nextVersion);
             Volatile.Write(ref _snapshot, snapshot);
             session.MarkPublished();
@@ -615,7 +720,10 @@ public sealed class FileIndexService : IDisposable
     {
         if (!session.HasFailures) return;
         var failedPaths = session.FailedPathsSnapshot();
-        foreach (var record in Volatile.Read(ref _snapshot).Records)
+        // With previews disabled, the previous active watcher can publish newer safe records
+        // during enumeration. Keep that live fallback rather than freezing it at rebuild start.
+        var retained = session.CanPublishPreviews ? session.RetainedSnapshot.Records : Volatile.Read(ref _snapshot).Records;
+        foreach (var record in retained)
         {
             session.Token.ThrowIfCancellationRequested();
             if (session.Configuration.IsInScope(record.FullPath, record.IsDirectory)
@@ -649,15 +757,17 @@ public sealed class FileIndexService : IDisposable
         catch (Exception ex) when (IsReadFailure(ex)) { session.NoteFailure(path); }
     }
 
-    private static SearchRecord[] CopyRecords(ConcurrentDictionary<string, SearchRecord> items, CancellationToken token)
+    private static SearchRecord[] CopyRecords(ConcurrentDictionary<string, SearchRecord> items, CancellationToken token, int maximum = int.MaxValue)
     {
-        // Only the scan (before publication) or one update pump writes this session at a time.
-        var result = new SearchRecord[items.Count];
+        // Preview enumeration can overlap additions by scan workers; only the final scan or
+        // update-pump copy has a stable count. Never expose the mutable dictionary to readers.
+        var result = new SearchRecord[Math.Min(items.Count, maximum)];
         var i = 0;
         foreach (var item in items)
         {
+            if (i == maximum) break;
             if ((i & 1023) == 0) token.ThrowIfCancellationRequested();
-            if (i == result.Length) Array.Resize(ref result, Math.Max(4, i * 2));
+            if (i == result.Length) Array.Resize(ref result, (int)Math.Min(maximum, Math.Max(4L, i * 2L)));
             result[i++] = item.Value;
         }
         if (i != result.Length) Array.Resize(ref result, i);
@@ -777,7 +887,7 @@ public sealed class FileIndexService : IDisposable
         // Session sources are released by their scan/pump finally blocks after readers finish.
     }
 
-    private sealed class PublishedSnapshot(SearchRecord[] records, long version)
+    private sealed class PublishedSnapshot(SearchRecord[] records, long version, bool isPartial = false)
     {
         // Immutable, completed prefixes only. Old generations stay alive while a search uses them.
         public SearchRecord[]? RecentTop500;
@@ -785,6 +895,7 @@ public sealed class FileIndexService : IDisposable
         public SearchRecord[] Records { get; } = records;
         public ReadOnlyCollection<SearchRecord> View { get; } = Array.AsReadOnly(records);
         public long Version { get; } = version;
+        public bool IsPartial { get; } = isPartial;
     }
 
     private sealed class IndexConfiguration(string[] roots, HashSet<string> excludes, bool includeDirectories)
@@ -819,7 +930,7 @@ public sealed class FileIndexService : IDisposable
         public AppSettings ToSettings() => new() { SearchRoots = Roots.ToList(), ExcludeFolderNames = Excludes.ToList(), IncludeDirectories = IncludeDirectories };
     }
 
-    private sealed class IndexSession(IndexConfiguration configuration, CancellationTokenSource cancellation, CancellationToken requestToken) : IDisposable
+    private sealed class IndexSession(IndexConfiguration configuration, CancellationTokenSource cancellation, CancellationToken requestToken, PublishedSnapshot retainedSnapshot, bool canPublishPreviews) : IDisposable
     {
         private readonly object _lock = new();
         private readonly CancellationTokenRegistration _requestRegistration = requestToken.Register(cancellation.Cancel);
@@ -834,6 +945,8 @@ public sealed class FileIndexService : IDisposable
         private bool _applying;
         private bool _unpublished;
         private bool _disposed;
+        public PublishedSnapshot RetainedSnapshot { get; set; } = retainedSnapshot;
+        public bool CanPublishPreviews { get; } = canPublishPreviews;
         public IndexConfiguration Configuration { get; } = configuration;
         public CancellationToken Token { get; } = cancellation.Token;
         public ConcurrentDictionary<string, SearchRecord> Items { get; } = new(StringComparer.OrdinalIgnoreCase);
@@ -848,6 +961,7 @@ public sealed class FileIndexService : IDisposable
         public void LeaveWorker() => Interlocked.Decrement(ref _activeWorkers);
         public int FailureVersion => Volatile.Read(ref _failureVersion);
         public bool HasFailures => !_failedPaths.IsEmpty;
+        public bool HasUnpublishedChanges { get { lock (_lock) return _unpublished; } }
         public bool NeedsRecovery => Volatile.Read(ref _needsRecovery) != 0;
         public bool IsDirty { get { lock (_lock) return NeedsRecovery || _pending.Count > 0 || _applying || _unpublished; } }
         public void NoteFailure(string path)

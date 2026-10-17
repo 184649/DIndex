@@ -1,7 +1,7 @@
-#Requires -Version 7.0
+﻿#Requires -Version 7.0
 [CmdletBinding()]
 param(
-    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$PackageVersion = '1.1.0',
+    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$PackageVersion = '1.1.1',
     [ValidatePattern('^net(8|10)\.0-windows(?:\.[0-9.]+)?$')][string]$TargetFramework,
     [ValidatePattern('^(8|10)\.0\.\d+$')][string]$RuntimeFrameworkVersion,
     [string]$OutputDirectory,
