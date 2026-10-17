@@ -19,6 +19,7 @@ internal static class Program
             ("bounded recent cache preserves limits, ties, cancellation and generations", EmptyCacheTests.Run),
             ("cached records are filtered by current settings", CacheScope),
             ("single-root traversal covers all descendants", Traversal),
+            ("static watcher tails drain without hiding recovery failures", StaticWatcherTail),
             ("preview test fixture paths are canonical on every platform", ProgressiveIndexTests.FixturePathsAreCanonical),
             ("bounded previews are searchable before scan completion and reconcile changes", ProgressiveIndexTests.SearchableBeforeCompletion),
             ("canceling a preview restores the prior snapshot", ProgressiveIndexTests.CancelRestoresBaseline),
@@ -166,10 +167,55 @@ internal static class Program
         var expected = Directory.EnumerateFileSystemEntries(tree.Root, "*", SearchOption.AllDirectories).Append(tree.Root).Order().ToArray();
         Equal(expected, service.Snapshot().Select(x => x.FullPath).Order(), "all descendants");
         Assert(counts >= 1 && counts <= 5, "Only throttled geometric previews plus final count notification");
+        await IndexStateAssertions.WaitForCleanStaticSnapshot(service, expected, "Clean after static enumeration");
+        // Re-enumerate after settling too: exact agreement must still hold, not just a clean flag.
+        Equal(Directory.EnumerateFileSystemEntries(tree.Root, "*", SearchOption.AllDirectories).Append(tree.Root).Order(),
+            service.Snapshot().Select(x => x.FullPath).Order(), "all descendants after watcher settling");
         var active = GetActive(service);
         var peak = (int)active.GetType().GetProperty("PeakWorkerCount")!.GetValue(active)!;
         Assert(peak > 1, $"A single root must actually keep multiple traversal workers active (peak={peak})");
-        Assert(!service.IsDirty && !service.IsRebuilding, "Clean after static enumeration");
+    }
+
+    private static async Task StaticWatcherTail()
+    {
+        using var tree = new Tree();
+        var paths = Enumerable.Range(0, 600).Select(i => tree.Write($"static-{i:D4}.txt")).ToArray();
+        using var service = new FileIndexService();
+        await service.RebuildAsync(tree.Settings(false), null, CancellationToken.None);
+        await IndexStateAssertions.WaitForCleanStaticSnapshot(service, paths, "initial static-tail fixture");
+        var active = GetActive(service); var version = service.SnapshotVersion;
+        // Reproduce a late notification tail deterministically, beyond the 512-path batch cap.
+        // These are current files, so every published snapshot must remain exactly equivalent.
+        IndexStateAssertions.State dirty;
+        // Use the service's existing lock order so the pump cannot consume part of the injected
+        // batch before its initial state is observed. No flags or records are changed directly.
+        lock (typeof(FileIndexService).GetField("_gate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(service)!)
+        lock (active.GetType().GetField("_lock", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(active)!)
+        {
+            foreach (var path in paths) Enqueue(active, path, false);
+            dirty = IndexStateAssertions.Capture(service);
+        }
+        Assert(dirty.IsDirty && dirty.Active!.PendingCount > 512 && !dirty.Active.NeedsRecovery,
+            "Injected watcher tail must be dirty without recovery: " + IndexStateAssertions.Describe(dirty));
+        await IndexStateAssertions.WaitForCleanStaticSnapshot(service, paths, "injected 600-path watcher tail");
+        Assert(service.SnapshotVersion >= version + 2 && ReferenceEquals(active, GetActive(service)),
+            "Two real watcher batches must publish without silently rebuilding");
+        Equal(paths.Order(), service.Snapshot().Select(x => x.FullPath).Order(), "static-tail final exact equivalence");
+
+        // Waiting must never turn a real read failure into an unobserved automatic-recovery pass.
+        active.GetType().GetMethod("NoteFailure")!.Invoke(active, new object[] { tree.Root });
+        try
+        {
+            await IndexStateAssertions.WaitForCleanStaticSnapshot(service, paths, "injected unreadable static root");
+            throw new Exception("Expected the settling assertion to reject a real read failure");
+        }
+        catch (Exception ex) when (ex.Message.Contains("cannot treat recovery", StringComparison.Ordinal))
+        {
+            Assert(ex.Message.Contains("\"needsRecovery\":true", StringComparison.Ordinal)
+                && ex.Message.Contains("\"failureVersion\":1", StringComparison.Ordinal)
+                && ex.Message.Contains("\"failedPathCount\":1", StringComparison.Ordinal),
+                "A rejected failure must expose recovery and failed-path diagnostics: " + ex.Message);
+        }
     }
 
     private static async Task ExclusionsAndLinks()

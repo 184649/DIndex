@@ -23,22 +23,34 @@ internal static class ProgressiveIndexTests
         using var service = new FileIndexService();
         using var blocked = new BlockedScan();
         var notifications = 0;
-        service.SnapshotChanged += _ => Interlocked.Increment(ref notifications);
+        var firstPublication = new TaskCompletionSource<(IReadOnlyCollection<SearchRecord> Snapshot, int SearchCount, bool IsDirty, bool IsRebuilding)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.SnapshotChanged += _ =>
+        {
+            Interlocked.Increment(ref notifications);
+            if (!firstPublication.Task.IsCompleted && service.Count > 0 && service.IsRebuilding)
+                firstPublication.TrySetResult((service.Snapshot(), service.Search("early-", false, 2000, CancellationToken.None).Count,
+                    service.IsDirty, service.IsRebuilding));
+        };
         service.CountChanged += _ => throw new InvalidOperationException("Faulty preview subscriber");
         service.SnapshotChanged += _ => throw new IOException("Faulty snapshot subscriber");
         var build = service.RebuildAsync(tree.Settings(), blocked.Progress, CancellationToken.None);
         await blocked.WaitEntered();
-        await Until(() => service.Count == 512, "bounded first searchable preview");
-        var first = service.Snapshot();
-        Assert(!build.IsCompleted && service.IsRebuilding && service.IsDirty, "Preview must remain explicitly incomplete");
-        Assert(service.Search("early-", false, 2000, CancellationToken.None).Count == 512, "Search uses preview before scan completion");
-        await Until(() => service.Count == 1400, "geometrically expanded preview includes all discovered files");
-        Assert(!build.IsCompleted && first.Count == 512, "Expansion preserves immutable older readers");
-        Assert(notifications == 2, "Preview notifications are bounded, not per file");
+        var firstResult = await firstPublication.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var first = firstResult.Snapshot;
+        var firstCount = first.Count;
+        Assert(firstCount > 0 && firstCount <= 512 && !build.IsCompleted && firstResult.IsRebuilding && firstResult.IsDirty,
+            "First preview is nonempty, bounded, and explicitly incomplete");
+        Assert(firstResult.SearchCount == firstCount, "Search uses the exact first preview before scan completion");
+        // Slow filesystems can reach the first timer before 512 files are discovered. Require
+        // the documented growth threshold, not an assumed speed or a full-scan preview.
+        await Until(() => service.Count >= Math.Max(512, 2 * firstCount) && Volatile.Read(ref notifications) >= 2,
+            "a geometrically expanded preview includes more discovered files");
+        Assert(!build.IsCompleted && first.Count == firstCount, "Expansion preserves immutable older readers");
+        Assert(notifications >= 2 && notifications <= 3, "At most three geometric previews for the fixed 1400-file fixture");
         var building = Session(service, "_building");
         var deleted = first.First().FullPath;
         File.Delete(deleted);
-        var updated = first.Skip(1).First().FullPath;
+        var updated = service.Snapshot().First(x => x.FullPath != deleted).FullPath;
         File.WriteAllText(updated, new string('x', 73));
         var created = tree.Write("created-during-scan.txt", "fresh");
         Enqueue(building, deleted); Enqueue(building, updated); Enqueue(building, created);
@@ -46,8 +58,8 @@ internal static class ProgressiveIndexTests
         Equal(Directory.EnumerateFiles(tree.Root).Order(), service.Snapshot().Select(x => x.FullPath).Order(), "Final reconciliation equals current filesystem");
         Assert(service.Snapshot().Single(x => x.FullPath == updated).SizeBytes == 73, "Final metadata includes watcher changes during preview");
         Assert(service.Count == service.Snapshot().Select(x => x.FullPath).Distinct(StringComparer.OrdinalIgnoreCase).Count(), "No duplicate paths in final snapshot");
-        await Until(() => !service.IsDirty, "final clean state");
-        Assert(!service.IsRebuilding && first.Count == 512, "Completed state and old snapshot remain correct");
+        await IndexStateAssertions.WaitForCleanStaticSnapshot(service, Directory.EnumerateFiles(tree.Root), "preview final clean state");
+        Assert(!service.IsRebuilding && first.Count == firstCount, "Completed state and old snapshot remain correct");
     }
 
     public static async Task CancelRestoresBaseline()
@@ -80,10 +92,16 @@ internal static class ProgressiveIndexTests
         var build = service.RebuildAsync(current.Settings("skip"), null, CancellationToken.None);
         Assert(service.Snapshot().All(x => x.FullPath.StartsWith(current.Root, StringComparison.Ordinal)), "Scope changes hide the previous preview immediately");
         blocked.Release(); await build; await Canceled(stale);
-        var published = service.Snapshot(); var version = service.SnapshotVersion;
+        await IndexStateAssertions.WaitForCleanStaticSnapshot(service, new[] { latest }, "new scope after superseding preview");
+        var published = service.Snapshot(); var publishedPaths = published.Select(x => x.FullPath).ToArray();
+        var version = service.SnapshotVersion; var request = service.RequestVersion; var active = Session(service, "_active");
         await Task.Delay(1200);
+        await IndexStateAssertions.WaitForCleanStaticSnapshot(service, new[] { latest }, "new scope after stale-publisher window");
         Equal(new[] { latest }, service.Snapshot().Select(x => x.FullPath), "New scope excludes forbidden folders and all old paths");
-        Assert(ReferenceEquals(published, service.Snapshot()) && version == service.SnapshotVersion, "Stale preview timer cannot publish after the newest generation");
+        Assert(ReferenceEquals(active, Session(service, "_active")) && request == service.RequestVersion && !service.IsRebuilding,
+            "Stale workers cannot replace the current active/request generation");
+        Assert(service.SnapshotVersion >= version, "Snapshot versions remain monotonic across valid watcher publications");
+        Equal(publishedPaths, published.Select(x => x.FullPath), "Old reader stays immutable across same-generation watcher publications");
     }
 
     public static async Task SupersededSameScopeCancellation()
@@ -114,6 +132,11 @@ internal static class ProgressiveIndexTests
         Directory.Delete(Path.Combine(tree.Root, "denied"), true);
         for (var i = 0; i < 1100; i++) tree.Write($"new-{i}.txt");
         using var blocked = new BlockedScan();
+        var finalPublication = new TaskCompletionSource<(IReadOnlyCollection<SearchRecord> Snapshot, bool IsDirty, bool IsRebuilding)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.SnapshotChanged += _ =>
+        {
+            if (!service.IsRebuilding) finalPublication.TrySetResult((service.Snapshot(), service.IsDirty, service.IsRebuilding));
+        };
         var build = service.RebuildAsync(tree.Settings("skip"), (count, directory) =>
         {
             // The existing suite exercises real Unix access denial where supported. Inject the
@@ -127,8 +150,10 @@ internal static class ProgressiveIndexTests
         Assert(!Has(service, excluded) && !Has(service, foreign), "Preview cannot leak excluded records");
         Assert(service.Count == service.Snapshot().Select(x => x.FullPath).Distinct(StringComparer.OrdinalIgnoreCase).Count(), "Merge deduplicates cached and discovered paths");
         blocked.Release(); await build;
-        Assert(Has(service, denied) && service.IsDirty && !service.IsRebuilding, "Final unreadable fallback survives previews and remains dirty");
-        Assert(!Has(service, excluded) && !Has(service, foreign), "Final fallback still enforces the narrowed scope");
+        var final = await finalPublication.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert(final.Snapshot.Any(x => x.FullPath == denied) && final.IsDirty && !final.IsRebuilding,
+            "Final unreadable fallback survives previews and remains dirty before automatic retry");
+        Assert(!final.Snapshot.Any(x => x.FullPath == excluded || x.FullPath == foreign), "Final fallback still enforces the narrowed scope");
     }
 
     public static async Task FailedScanRestoresBaseline()
@@ -177,14 +202,21 @@ internal static class ProgressiveIndexTests
         using var tree = new Tree();
         using var service = new FileIndexService();
         await service.RebuildAsync(tree.Settings(), null, CancellationToken.None);
+        await IndexStateAssertions.WaitForCleanStaticSnapshot(service, Array.Empty<string>(), "empty active baseline");
         var active = Session(service, "_active");
-        var old = tree.Write("old.txt"); // Empty published baseline still needs an early preview.
         using var cancellation = new CancellationTokenSource(); using var blocked = new BlockedScan();
-        var build = service.RebuildAsync(tree.Settings(), blocked.Progress, cancellation.Token);
+        string old; long version; Task build;
+        // Make file creation + rebuild admission atomic relative to the old pump's publication.
+        lock (typeof(FileIndexService).GetField("_gate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(service)!)
+        {
+            old = tree.Write("old.txt"); // Empty published baseline still needs an early preview.
+            version = service.SnapshotVersion;
+            build = service.RebuildAsync(tree.Settings(), blocked.Progress, cancellation.Token);
+        }
         await blocked.WaitEntered();
-        var version = service.SnapshotVersion;
         await Until(() => service.SnapshotVersion > version, "active generation preview");
         var preview = service.Snapshot();
+        Assert(IndexStateAssertions.Capture(service).IsPartial, "The observed publication is a real rebuild preview");
         File.Delete(old); var added = tree.Write("after-preview.txt");
         Enqueue(active, old); Enqueue(active, added);
         await Until(() => (bool)active.GetType().GetProperty("HasUnpublishedChanges")!.GetValue(active)!, "old pump stages its watcher updates");
@@ -198,20 +230,26 @@ internal static class ProgressiveIndexTests
         using var tree = new Tree(); var keep = tree.Write("keep.txt");
         using var service = new FileIndexService();
         await service.RebuildAsync(tree.Settings(), null, CancellationToken.None);
+        await IndexStateAssertions.WaitForCleanStaticSnapshot(service, new[] { keep }, "nonempty active baseline");
         var active = Session(service, "_active"); var baseline = service.Snapshot();
-        var publications = 0; service.SnapshotChanged += _ => Interlocked.Increment(ref publications);
+        var partialPublications = 0;
+        service.SnapshotChanged += _ => { if (IndexStateAssertions.Capture(service).IsPartial) Interlocked.Increment(ref partialPublications); };
         using var blocked = new BlockedScan();
         var build = service.RebuildAsync(tree.Settings(), blocked.Progress, CancellationToken.None);
         await blocked.WaitEntered();
         Assert(!(bool)Session(service, "_building").GetType().GetProperty("CanPublishPreviews")!.GetValue(Session(service, "_building"))!, "Nonempty unchanged-scope baseline skips previews");
         await Task.Delay(600);
-        Assert(ReferenceEquals(baseline, service.Snapshot()) && publications == 0, "Unchanged scope avoids redundant preview copies");
+        Assert(partialPublications == 0 && !IndexStateAssertions.Capture(service).IsPartial, "Unchanged scope avoids redundant previews while allowing legitimate watcher publications");
+        Equal(new[] { keep }, service.Snapshot().Select(x => x.FullPath), "Static same-scope contents stay exact");
         var added = tree.Write("live-during-rebuild.txt");
         Enqueue(active, added); Enqueue(Session(service, "_building"), added);
         await Until(() => Has(service, added), "existing active watcher stays live during same-scope scan");
         Assert(!build.IsCompleted && Has(service, keep) && service.IsDirty && service.IsRebuilding, "Live old results do not imply the new scan is complete");
         blocked.Release(); await build;
+        await IndexStateAssertions.WaitForCleanStaticSnapshot(service, new[] { added, keep }, "same-scope final clean state");
         Equal(new[] { added, keep }.Order(), service.Snapshot().Select(x => x.FullPath).Order(), "Same-scope final result reconciles both files");
+        Equal(new[] { keep }, baseline.Select(x => x.FullPath), "Earlier same-scope reader remains immutable");
+        Assert(partialPublications == 0, "Same-scope refresh never emits partial previews");
     }
 
     public static async Task ExpandedScopeStillPublishesEarly()
@@ -227,7 +265,9 @@ internal static class ProgressiveIndexTests
         await blocked.WaitEntered(); await Until(() => service.Count > 1, "scope expansion preview");
         Assert(Has(service, keep) && service.Search("expanded-", false, 1, CancellationToken.None).Count == 1 && !build.IsCompleted, "Scope expansion preserves old records and reveals new-root matches early");
         blocked.Release(); await build;
-        Assert(service.Count == 1101 && !service.IsDirty, "Expanded scope completes without duplicates");
+        await IndexStateAssertions.WaitForCleanStaticSnapshot(service,
+            new[] { keep }.Concat(Directory.EnumerateFiles(added.Root)), "expanded scope final clean state");
+        Assert(service.Count == 1101, "Expanded scope completes without duplicates");
     }
 
     private static object Session(FileIndexService service, string field) => typeof(FileIndexService).GetField(field, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(service)!;

@@ -13,6 +13,7 @@
     <Compile Include="Program.cs" />
     <Compile Include="EmptyCacheTests.cs" />
     <Compile Include="ProgressiveIndexTests.cs" />
+    <Compile Include="IndexStateAssertions.cs" />
     <Compile Include="ClipboardStub.cs" />
   </ItemGroup>
 </Project>

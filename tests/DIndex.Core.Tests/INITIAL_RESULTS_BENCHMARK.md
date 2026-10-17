@@ -14,9 +14,9 @@ Date: 2026-10-17. Baseline source: published commit `9dfa31626f37530f9e0215b19bf
 
 ## Deterministic regressions
 
-The final core executable has 40 passing cases, 0 skipped on this host: the existing 29 cases plus ten preview/selective-policy cases and a cross-platform fixture-path regression. The new cases use an explicit progress-callback barrier rather than guessing whether disk traversal is still running.
+The final core executable has 41 passing cases, 0 skipped on this host: the existing 29 cases, ten preview/selective-policy cases, a cross-platform fixture-path regression, and a deterministic watcher-tail/diagnostics regression. The new cases use an explicit progress-callback barrier rather than guessing whether disk traversal is still running.
 
-1. First 512 results are searchable while the scan task is blocked; the next preview includes all 1,400 discovered records; prior readers remain immutable; final create/update/delete replay matches the filesystem without duplicate paths.
+1. The first nonempty preview (at most 512 records) is captured at publication and is searchable before scan completion; a later preview meets the configured geometric growth threshold while the 1,400-file scan is blocked. Prior readers remain immutable, and final create/update/delete replay matches the complete filesystem without duplicates. The test does not assume that a slow filesystem discovers 512 files before the first timer.
 2. Cancellation after preview restores cached records and the correct dirty state.
 3. A new scope hides the old preview immediately; a late old publisher cannot overwrite it.
 4. Canceling a queued same-scope successor restores the true baseline, not the previous partial snapshot.
@@ -27,8 +27,17 @@ The final core executable has 40 passing cases, 0 skipped on this host: the exis
 9. An unchanged, nonempty scope performs no redundant preview publication; its old watcher still exposes changes while the rebuild is blocked.
 10. Scope expansion preserves old results and makes new-root matches searchable before traversal completes.
 11. Test fixture paths canonicalize nested separators and dot segments exactly like indexed FileInfo.FullName paths. This catches the mixed-separator expectation bug exposed by Windows CI; strict scope comparisons remain in place and now report expected, actual, missing, and unexpected paths.
+12. A deterministic 600-path notification tail, larger than the 512-path replay batch, starts dirty and drains through two real watcher publications. Exact static paths remain unchanged. The same helper immediately rejects an injected read/recovery failure rather than waiting for automatic recovery to hide it.
 
 `initial-results-core-test.log` contains the final run. Use `run-core-tests.sh` for the existing .NET 8 core-only runner or the normal .NET 10 test project where installed. Linux core verification does not validate WPF, Windows ACLs, or the production Windows installer.
+
+## Asynchronous watcher-tail assertions
+
+Rebuild completion publishes after one bounded pending batch; it does not guarantee that the asynchronous watcher queue is empty forever. The former traversal assertion demanded `IsDirty == false` immediately, which Windows CI sometimes rejected without recording why. The earlier Windows failure log cannot establish whether its reason was a harmless pending batch or a real watcher/read failure.
+
+`IndexStateAssertions` is test-only. When dirty state is observed, it prints initial state even if settling succeeds: rebuild/partial/cache flags, request and snapshot versions, active/building identity, pending count and path samples, applying/unpublished flags, recovery state, failure version and failed paths, active workers, and cancellation state. It allows at most ten seconds for pending/applying/unpublished work to drain and requires a 100 ms clean observation window. It immediately rejects read/recovery failures, unexpected partial/cache state, cancellation, or a replacement generation. Exact path equality is checked throughout and again against the filesystem afterward; production behavior and dirty flags are not altered.
+
+Supersession tests verify active/request identity, forbidden-path exclusion, monotonic versions, and immutable old readers rather than treating every valid same-generation watcher publication as stale work. Preview tests capture the first publication with a completion handshake; the empty-baseline watcher test captures its version before starting the rebuild. The failure-preservation test inspects the exact final publication before its deliberately injected failure can trigger a legitimate automatic retry.
 
 ## Timing method
 
