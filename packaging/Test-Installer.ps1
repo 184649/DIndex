@@ -29,6 +29,7 @@ $currentUserSid = $identity.User.Value
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 $isAdministrator = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $identity.Dispose()
+. (Join-Path $PSScriptRoot 'MsiRegistration.ps1')
 
 function Assert-True([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
 function Record-Pass([string]$Name) {
@@ -103,51 +104,8 @@ function Assert-PackagePolicy($Build) {
     Assert-True ([string]($summary.Property(7)) -like 'x64;*') 'Package is not x64.'
     Record-Pass "MSI table policy $($Build.packageVersion)"
 }
-function Get-MsiProductRegistrations([string]$ProductCode) {
-    # Query MSI's supported context-aware API, not a registry layout assumption.
-    # https://learn.microsoft.com/en-us/windows/win32/msi/installer-productsex
-    # https://learn.microsoft.com/en-us/windows/win32/msi/product-installproperty
-    # Context 2=current-user unmanaged, 1=current-user managed, 4=machine.
-    $installer = New-Object -ComObject WindowsInstaller.Installer
-    try {
-        foreach ($context in @(2, 1, 4)) {
-            # COM ProductsEx uses an empty string for machine enumeration, as in
-            # Microsoft's WiLstPrdEx.vbs sample. PowerShell's COM binder rejects
-            # a null argument here. Explicit current SID restricts user queries.
-            $querySid = if ($context -eq 4) { [string]::Empty } else { $currentUserSid }
-            $products = $null
-            $count = 0
-            try {
-                $products = $installer.ProductsEx($ProductCode, $querySid, $context)
-                foreach ($product in $products) {
-                    try {
-                        $count++
-                        # SDK Msi.h: INSTALLPROPERTY_PRODUCTSTATE is the literal State.
-                        $state = [string]$product.InstallProperty('State')
-                        $version = if ($state -eq '5') { [string]$product.InstallProperty('VersionString') } else { '<not installed>' }
-                        $entry = [pscustomobject]@{
-                            productCode = [string]$product.ProductCode
-                            context = [int]$product.Context
-                            userSid = [string]$product.UserSid
-                            state = $state
-                            version = $version
-                        }
-                        Write-Host "MSI registration $ProductCode context=$($entry.context) currentUser=$($entry.userSid -eq $currentUserSid) state=$state version=$version"
-                        $entry
-                    } finally { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($product) }
-                }
-                if ($count -eq 0) { Write-Host "MSI registration $ProductCode context=$context absent" }
-            } catch {
-                Write-Host "MSI registration query failed: product=$ProductCode context=$context error=$($_.Exception.Message)"
-                throw
-            } finally {
-                if ($null -ne $products) { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($products) }
-            }
-        }
-    } finally { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($installer) }
-}
 function Assert-ProductRegistration($Build, [bool]$Installed, [string]$Scenario) {
-    $registrations = @(Get-MsiProductRegistrations $Build.productCode)
+    $registrations = @(Get-MsiProductRegistrations $Build.productCode $currentUserSid)
     $registrationChecks.Add([pscustomobject]@{
         scenario = $Scenario; productCode = $Build.productCode; expectedInstalled = $Installed
         registrations = $registrations
@@ -182,6 +140,7 @@ function Assert-Sentinel {
 try {
     # Fail fast on COM/API binding problems before three expensive MSI builds.
     $preflight = [pscustomobject]@{ productCode = [guid]::NewGuid().ToString('B').ToUpperInvariant() }
+    Assert-MsiProductIdentityApi $preflight.productCode $currentUserSid
     Assert-ProductRegistration $preflight $false 'MSI registration API preflight'
     Record-Pass 'MSI registration API preflight for current-user and machine contexts'
 
@@ -193,11 +152,7 @@ try {
     $v1 = & (Join-Path $PSScriptRoot 'Build-Installer.ps1') @buildArgs -PackageVersion '1.1.0'
     $packages.Add($v1)
     $buildArgs.WixSourceArchive = $v1.wixSourceArchive
-    $v2 = & (Join-Path $PSScriptRoot 'Build-Installer.ps1') @buildArgs -PackageVersion '1.1.1' -FixturePayloadDirectory $v1.payloadDirectory
-    $packages.Add($v2)
-    $v3 = & (Join-Path $PSScriptRoot 'Build-Installer.ps1') @buildArgs -PackageVersion '1.1.2' -FixturePayloadDirectory $v1.payloadDirectory
-    $packages.Add($v3)
-    foreach ($p in $packages) { Assert-PackagePolicy $p }
+    Assert-PackagePolicy $v1
     $installPath = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) "Programs/$($v1.installFolder)"
     $startFolder = Join-Path ([Environment]::GetFolderPath('Programs')) $v1.productName
     $startLink = Join-Path $startFolder "$($v1.productName).lnk"
@@ -277,6 +232,14 @@ try {
     $null = Invoke-Msi 'opt-in-shortcuts' @('/i', ('"' + $v1.msiPath + '"'), 'ADDLOCAL=Core,DesktopShortcutFeature,StartupShortcutFeature')
     Assert-True ((Test-Path $desktopLink) -and (Test-Path $startupLink)) 'Explicit shortcut opt-in failed.'
     Record-Pass 'Explicit desktop/startup opt-in'
+
+    # Build newer fixtures only after version 1 installation/repair is proven.
+    $v2 = & (Join-Path $PSScriptRoot 'Build-Installer.ps1') @buildArgs -PackageVersion '1.1.1' -FixturePayloadDirectory $v1.payloadDirectory
+    $packages.Add($v2)
+    $v3 = & (Join-Path $PSScriptRoot 'Build-Installer.ps1') @buildArgs -PackageVersion '1.1.2' -FixturePayloadDirectory $v1.payloadDirectory
+    $packages.Add($v3)
+    Assert-PackagePolicy $v2
+    Assert-PackagePolicy $v3
 
     $runningFixture = Start-Process (Join-Path $helperOut "$($config.app).exe") -PassThru -WindowStyle Hidden
     Start-Sleep -Milliseconds 500

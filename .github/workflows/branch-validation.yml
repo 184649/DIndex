@@ -11,6 +11,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Read-only Windows Installer COM contract probe
+        shell: pwsh
+        run: ./packaging/Test-MsiRegistrationApi.ps1
       - name: Select preinstalled .NET 10 SDK (no installation)
         shell: pwsh
         run: |

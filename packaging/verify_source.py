@@ -19,6 +19,8 @@ class PackagingContract(unittest.TestCase):
         cls.config = json.loads((ROOT / "Product.json").read_text())
         cls.build = (ROOT / "Build-Installer.ps1").read_text()
         cls.tests = (ROOT / "Test-Installer.ps1").read_text()
+        cls.registration = (ROOT / "MsiRegistration.ps1").read_text()
+        cls.preflight = (ROOT / "Test-MsiRegistrationApi.ps1").read_text()
 
     def test_limited_per_user_only(self):
         package = self.product.find("w:Product/w:Package", NS)
@@ -137,12 +139,12 @@ class PackagingContract(unittest.TestCase):
                          "Assert-ProductRegistration $v1 $false", "Assert-ProductRegistration $v3 $false",
                          "Assert-ProductRegistration $v2 $false", "registrationChecks = $registrationChecks",
                          "ALLUSERS=1", "MSIINSTALLPERUSER=1"):
-            self.assertIn(required, self.tests)
-        self.assertNotIn("InstallProperty('ProductState')", self.tests)
+            self.assertIn(required, self.tests + self.registration)
+        self.assertNotIn("InstallProperty('ProductState')", self.registration)
 
     def test_registration_api_preflight_precedes_builds(self):
-        self.assertIn("$querySid = if ($context -eq 4) { [string]::Empty }", self.tests)
-        self.assertNotIn("$querySid = if ($context -eq 4) { $null }", self.tests)
+        self.assertIn("$querySid = if ($context -eq 4) { [string]::Empty }", self.registration)
+        self.assertNotIn("$querySid = if ($context -eq 4) { $null }", self.registration)
         preflight = self.tests.index("Assert-ProductRegistration $preflight $false")
         build = self.tests.index("$v1 = & (Join-Path $PSScriptRoot 'Build-Installer.ps1')")
         self.assertLess(preflight, build)
@@ -159,6 +161,31 @@ class PackagingContract(unittest.TestCase):
         self.assertIn("Assert-Installed $v1", probe)
         self.assertIn("-not (Test-Path $installPath)", probe)
         self.assertIn("Assert-Sentinel", probe)
+
+    def test_com_product_identity_uses_explicit_property_dispatch(self):
+        for name in ("ProductCode", "Context", "UserSid"):
+            self.assertIn(f"InvokeMember('{name}', $getProperty", self.registration)
+            self.assertNotIn(f"$product.{name}", self.registration)
+        self.assertIn("[Reflection.BindingFlags]::GetProperty", self.registration)
+        self.assertIn("$exception.InnerException", self.registration)
+        self.assertIn("HRESULT=0x", self.registration)
+        self.assertIn("$productIdentity = Get-MsiProductIdentity $product", self.registration)
+        preflight = self.tests.index("Assert-MsiProductIdentityApi $preflight.productCode")
+        build = self.tests.index("$v1 = & (Join-Path $PSScriptRoot 'Build-Installer.ps1')")
+        self.assertLess(preflight, build)
+
+    def test_shared_read_only_api_probe_and_staged_fixture_builds(self):
+        for script in (self.tests, self.preflight):
+            self.assertIn("'MsiRegistration.ps1'", script)
+        self.assertIn("Assert-MsiProductIdentityApi $productCode $currentUserSid", self.preflight)
+        self.assertIn("Get-MsiProductRegistrations $productCode $currentUserSid", self.preflight)
+        for forbidden in ("msiexec", "Build-Installer", "Set-ItemProperty", "Set-Content"):
+            self.assertNotIn(forbidden, self.preflight)
+        repair = self.tests.index("Record-Pass 'Same-version repair restores deleted payload'")
+        v2 = self.tests.index("$v2 = & (Join-Path $PSScriptRoot 'Build-Installer.ps1')")
+        self.assertLess(repair, v2)
+        self.assertNotIn("$v2", self.tests[:v2])
+        self.assertNotIn("$v3", self.tests[:v2])
 
     def test_fixture_isolation_and_coverage(self):
         uuid.UUID(self.config["upgradeCode"])
