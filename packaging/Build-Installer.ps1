@@ -176,7 +176,7 @@ $lines = [Collections.Generic.List[string]]::new()
 $refs = [Collections.Generic.List[string]]::new()
 $lines.Add('<?xml version="1.0" encoding="utf-8"?>')
 $lines.Add("<Wix xmlns=`"$ns`"><Fragment>")
-$directoryIds = @{ '' = 'INSTALLFOLDER' }
+$directoryIds = @{ '' = 'AppInstallFolder' }
 $directories = @(Get-ChildItem $payload -Directory -Recurse | Sort-Object { $_.FullName.Length }, FullName)
 foreach ($dir in $directories) {
     $rel = [IO.Path]::GetRelativePath($payload, $dir.FullName).Replace('\','/')
@@ -220,8 +220,22 @@ foreach ($entry in $defines.GetEnumerator()) { $candleArgs += "-d$($entry.Key)=$
 $candleArgs += @('-out', ($work + [IO.Path]::DirectorySeparatorChar), (Join-Path $PSScriptRoot 'Product.wxs'), (Join-Path $PSScriptRoot 'PreviewUI.wxs'), $payloadWxs)
 Invoke-Checked (Join-Path $WixBin 'candle.exe') $candleArgs
 $msi = Join-Path $work "$identity-$PackageVersion-win-x64.msi"
-Invoke-Checked (Join-Path $WixBin 'light.exe') @('-nologo', '-wx', '-cultures:en-us', '-ext', (Join-Path $WixBin 'WixUIExtension.dll'), '-ext', (Join-Path $WixBin 'WixUtilExtension.dll'),
+# Run every ICE. Warnings are checked below, not suppressed or skipped.
+# The documented ICE91 per-user-only file warning is the sole conditional exception.
+$lightArgs = @('-nologo', '-cultures:en-us', '-ext', (Join-Path $WixBin 'WixUIExtension.dll'), '-ext', (Join-Path $WixBin 'WixUtilExtension.dll'),
     '-out', $msi, (Join-Path $work 'Product.wixobj'), (Join-Path $work 'PreviewUI.wixobj'), (Join-Path $work 'Payload.wixobj'))
+$lightOutput = @(& (Join-Path $WixBin 'light.exe') @lightArgs 2>&1 | ForEach-Object { [string]$_ })
+$lightExitCode = $LASTEXITCODE
+$lightLog = Join-Path $work 'light-validation.log'
+$lightOutput | Set-Content -LiteralPath $lightLog -Encoding utf8
+if ($lightExitCode -ne 0) {
+    $lightOutput | Select-Object -Last 80 | Out-Host
+    throw "WiX light failed with exit code $lightExitCode. Full validation log: $lightLog"
+}
+. (Join-Path $PSScriptRoot 'Assert-MsiPolicy.ps1')
+$msiPolicy = Assert-PerUserMsiPolicy -MsiPath $msi -ProductSourcePath (Join-Path $PSScriptRoot 'Product.wxs') -ExpectedInstallFolder $identity
+$validationWarnings = Get-AllowedWixWarnings -Lines $lightOutput
+Write-Host "WiX validation complete: $($validationWarnings.count) documented ICE91 file warnings accepted after per-user MSI invariants passed. Full log: $lightLog"
 $result = [ordered]@{
     app = $config.app; packageVersion = $PackageVersion; productCode = "{$productCode}"; upgradeCode = "{$upgradeCode}"
     productName = $productName; installFolder = $identity; registryKey = $registryKey; fixtureId = $FixtureId
@@ -229,6 +243,7 @@ $result = [ordered]@{
     wixSourceArchive = $sourceArchive; wixSourceUrl = $sourceUrl; wixSourceSha256 = (Get-FileHash $sourceArchive -Algorithm SHA256).Hash
     sdk = $sdkVersion; targetFramework = $TargetFramework; wix = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $WixBin 'candle.exe')).FileVersion
     wixComponents = $wixComponents
+    msiPolicy = $msiPolicy; validationWarnings = $validationWarnings; validationLog = $lightLog
     includedFrameworks = $runtime.runtimeOptions.includedFrameworks
     runtimeFrameworkVersion = $RuntimeFrameworkVersion
     coreClrFileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $payload 'coreclr.dll')).FileVersion

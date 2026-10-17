@@ -32,6 +32,7 @@
     <Condition Message="This package requires 64-bit Windows.">Installed OR VersionNT64</Condition>
     <Condition Message="This package requires Windows 10 version 1607 (build 14393) or later, or Windows Server 2016 or later. Use an edition still supported by Microsoft.">Installed OR (WINDOWS_MAJOR = "#10" AND WINDOWS_BUILD &gt;= 14393)</Condition>
     <Condition Message="This installer is current-user only. Do not set ALLUSERS.">NOT ALLUSERS</Condition>
+    <Condition Message="This installer has a fixed per-user scope. Do not set MSIINSTALLPERUSER.">NOT MSIINSTALLPERUSER</Condition>
 
     <!-- Detection only. No WM_CLOSE, WM_ENDSESSION, elevation, termination or reboot.
          WiX requires Timeout >= 1; with every close/end-session option disabled
@@ -53,7 +54,7 @@
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="LocalAppDataFolder">
         <Directory Id="UserProgramsFolder" Name="Programs">
-          <Directory Id="INSTALLFOLDER" Name="$(var.InstallFolder)" />
+          <Directory Id="AppInstallFolder" Name="$(var.InstallFolder)" />
         </Directory>
       </Directory>
       <Directory Id="ProgramMenuFolder">
@@ -65,23 +66,23 @@
 
     <DirectoryRef Id="AppMenuFolder">
       <Component Id="StartMenuShortcut" Guid="$(var.StartMenuGuid)" Win64="yes">
-        <Shortcut Id="StartMenuLink" Name="$(var.ProductName)" Target="[INSTALLFOLDER]$(var.AppExe)"
-                  WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" Advertise="no" />
+        <Shortcut Id="StartMenuLink" Name="$(var.ProductName)" Target="[AppInstallFolder]$(var.AppExe)"
+                  WorkingDirectory="AppInstallFolder" Icon="AppIcon" Advertise="no" />
         <RemoveFolder Id="RemoveAppMenuFolder" On="uninstall" />
         <RegistryValue Root="HKCU" Key="$(var.RegistryKey)" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
       </Component>
     </DirectoryRef>
     <DirectoryRef Id="DesktopFolder">
       <Component Id="DesktopShortcut" Guid="$(var.DesktopGuid)" Win64="yes">
-        <Shortcut Id="DesktopLink" Name="$(var.ProductName)" Target="[INSTALLFOLDER]$(var.AppExe)"
-                  WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" Advertise="no" />
+        <Shortcut Id="DesktopLink" Name="$(var.ProductName)" Target="[AppInstallFolder]$(var.AppExe)"
+                  WorkingDirectory="AppInstallFolder" Icon="AppIcon" Advertise="no" />
         <RegistryValue Root="HKCU" Key="$(var.RegistryKey)" Name="Desktop" Type="integer" Value="1" KeyPath="yes" />
       </Component>
     </DirectoryRef>
     <DirectoryRef Id="StartupFolder">
       <Component Id="StartupShortcut" Guid="$(var.StartupGuid)" Win64="yes">
-        <Shortcut Id="StartupLink" Name="$(var.ProductName)" Target="[INSTALLFOLDER]$(var.AppExe)"
-                  WorkingDirectory="INSTALLFOLDER" Icon="AppIcon" Advertise="no" />
+        <Shortcut Id="StartupLink" Name="$(var.ProductName)" Target="[AppInstallFolder]$(var.AppExe)"
+                  WorkingDirectory="AppInstallFolder" Icon="AppIcon" Advertise="no" />
         <RegistryValue Root="HKCU" Key="$(var.RegistryKey)" Name="Startup" Type="integer" Value="1" KeyPath="yes" />
       </Component>
     </DirectoryRef>

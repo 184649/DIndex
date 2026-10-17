@@ -26,7 +26,7 @@ class PackagingContract(unittest.TestCase):
         self.assertEqual(package.get("Platform"), "x64")
         for value in self.product.findall(".//w:RegistryValue", NS):
             self.assertEqual(value.get("Root"), "HKCU")
-        self.assertIsNotNone(self.product.find(".//w:Directory[@Id='LocalAppDataFolder']/w:Directory[@Name='Programs']/w:Directory[@Id='INSTALLFOLDER']", NS))
+        self.assertIsNotNone(self.product.find(".//w:Directory[@Id='LocalAppDataFolder']/w:Directory[@Name='Programs']/w:Directory[@Id='AppInstallFolder']", NS))
 
     def test_transactional_upgrade_and_downgrade(self):
         upgrade = self.product.find("w:Product/w:MajorUpgrade", NS)
@@ -90,6 +90,20 @@ class PackagingContract(unittest.TestCase):
         self.assertIn("Third-party", self.build.replace("third-party", "Third-party"))
         for forbidden in ("dotnet-install", "dotnet tool install", "choco install", "winget install", "-sval", "-sice"):
             self.assertNotIn(forbidden, self.build.lower())
+
+    def test_validation_retains_only_conditional_ice91_exception(self):
+        policy = (ROOT / "Assert-MsiPolicy.ps1").read_text()
+        self.assertIn("Assert-PerUserMsiPolicy -MsiPath $msi", self.build)
+        self.assertIn("Get-AllowedWixWarnings -Lines $lightOutput", self.build)
+        self.assertIn("validationWarnings = $validationWarnings", self.build)
+        self.assertIn("NOT ALLUSERS", policy)
+        self.assertIn("NOT MSIINSTALLPERUSER", policy)
+        self.assertIn("Public destination directory is forbidden", policy)
+        self.assertIn("outside the permitted per-user directories", policy)
+        self.assertIn("Unapproved WiX warning", policy)
+        self.assertIn("LGHT1076 : ICE91: The file", policy)
+        self.assertIn("testUserIsAdministrator", self.tests)
+        self.assertIn("standardUserInstallEstablished", self.tests)
 
     def test_fixture_isolation_and_coverage(self):
         uuid.UUID(self.config["upgradeCode"])

@@ -23,6 +23,10 @@ $results = [Collections.Generic.List[object]]::new()
 $packages = [Collections.Generic.List[object]]::new()
 $runningFixture = $null
 $success = $false
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = [Security.Principal.WindowsPrincipal]::new($identity)
+$isAdministrator = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$identity.Dispose()
 
 function Assert-True([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
 function Record-Pass([string]$Name) {
@@ -240,7 +244,10 @@ try {
         try { $null = Invoke-Msi "cleanup-$($p.packageVersion)" @('/x', $p.productCode) @(0,1605) }
         catch { Write-Warning $_.Exception.Message }
     }
-    [ordered]@{ success = $success; fixtureId = $fixtureId; logs = $logs; checks = $results; testedAtUtc = [DateTime]::UtcNow.ToString('o') } |
+    [ordered]@{ success = $success; fixtureId = $fixtureId; logs = $logs; checks = $results; testedAtUtc = [DateTime]::UtcNow.ToString('o')
+        testUserIsAdministrator = $isAdministrator
+        standardUserInstallEstablished = ($success -and -not $isAdministrator)
+        privilegeLimitation = $(if ($isAdministrator) { 'Executed with an administrator token. Limited MSI metadata was checked, but actual standard-user installation is not established.' } else { 'Executed without an administrator token; interactive UI acceptance remains separate.' }) } |
         ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutputDirectory "test-results-$fixtureId.json")
     # Preserve all logs and data sentinels for inspection. The disposable VM/runner
     # owns their eventual removal; never recursively delete AppData in a test.

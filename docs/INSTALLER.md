@@ -71,6 +71,21 @@ The WiX source archive is read-only documentation, never compiled, installed or 
 
 Do not use a fixture MSI as a deliverable. The build produces a separate random identity when `-FixtureId` is provided; that argument is for the test script only.
 
+## MSI validation and the narrow ICE91 exception
+
+All WiX/MSI ICE validation remains enabled. Candle treats every warning as an error. Light captures its complete output in `light-validation.log`; nonzero exit status or any warning outside the following exact allowlist fails the build:
+
+- `warning LGHT1076 : ICE91: The file ... will be installed to the per user directory ...` with the documented ALLUSERS/per-machine warning text
+
+This is not a blanket LGHT1076 or ICE91 suppression. Even another ICE91 message category is rejected. Microsoft [documents ICE91 as harmless for a package used exclusively per-user](https://learn.microsoft.com/en-us/windows/win32/msi/ice91). Before accepting it, `Assert-MsiPolicy.ps1` examines the actual linked MSI and requires:
+
+- Explicit `perUser`/`limited` authoring and the linked package’s no-elevation summary flag
+- No authored `ALLUSERS` or `MSIINSTALLPERUSER` value, with launch conditions rejecting either override
+- A private, mixed-case `AppInstallFolder` directory fixed beneath the current user’s `LocalAppDataFolder/Programs`; no public destination directory properties
+- Every component beneath that application directory or the current user’s Start menu/Desktop/Startup directory, plus HKCU-only registry writes
+
+The ordinary command-line `INSTALLFOLDER=...` property cannot redirect the private directory. Altering a package using an external MSI transform is outside the supported installer contract. The manifest stores the mechanically checked policy, the exact allowlist, the number of accepted warnings and the full validation-log path. A nonzero accepted warning count must not be described as “zero warnings”. Both initial Windows linking attempts reported only this expected file warning (478 occurrences); later builds record their own counts.
+
 ## Automated Windows integration tests
 
 Only run in a disposable VM or CI runner account. The test script deliberately changes that account’s MSI registration and creates temporary shortcuts. It refuses to proceed without the explicit switch below. It never uses the ordinary or Preview product UpgradeCode, install directory or profile, and never launches the real application.
@@ -98,7 +113,7 @@ Tests build synthetic versions `1.1.0`, `1.1.1`, `1.1.2` with one random fixture
 
 Only fixture builds include WiX’s `WixFailWhenDeferred` failure-injection action; it is excluded from ordinary MSI builds. Process checks use a tiny self-contained helper with the same EXE basename, which exits on its own after 45 seconds. There is no process kill. These tests do not prove that every real-app exit/save path works; that belongs in interactive acceptance.
 
-Each MSI operation has a verbose log. `test-results-<GUID>.json` records passed checks or the first failure. Fixture products are uninstalled in `finally`; any cleanup failure is reported. Test output and data sentinels are left for inspection and eventual disposable-environment removal. No upload, Release, signing, CI dispatch or user-computer installation is performed by either script.
+Each MSI operation has a verbose log. `test-results-<GUID>.json` records passed checks or the first failure, plus whether the executing Windows token is an administrator. An administrator-run test explicitly records that real standard-user installation has not been established. Unexpected MSI exit codes print at most 80 relevant failure-log lines to CI, while preserving the complete local log. Fixture products are uninstalled in `finally`; any cleanup failure is reported. Test output and data sentinels are left for inspection and eventual disposable-environment removal. No upload, Release, signing, CI dispatch or user-computer installation is performed by either script.
 
 ## Interactive acceptance before distribution
 
