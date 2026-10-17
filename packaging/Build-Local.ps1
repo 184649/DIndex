@@ -168,6 +168,8 @@ MSI の導入・修復・更新・削除の動作は、この起動確認だけ�
     $message = $_.Exception.Message
     Write-Host ''
     Write-Host ('ビルドを中止しました: ' + $message) -ForegroundColor Red
+    Write-Host $_.ScriptStackTrace
+    Write-Host $_.InvocationInfo.PositionMessage
     Write-Host '不足ツール・通信・保存先を確認してから Build.cmd をもう一度開いてください。'
     Write-Host '実行ポリシーや Windows のセキュリティ設定は変更していません。'
     if ($buildDirectory -and (Test-Path -LiteralPath $buildDirectory -PathType Container)) {

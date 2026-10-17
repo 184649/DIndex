@@ -1,5 +1,6 @@
 """Fast cross-platform authoring checks; not a replacement for Windows MSI tests."""
 import json
+import re
 from pathlib import Path
 import unittest
 import uuid
@@ -104,6 +105,28 @@ class PackagingContract(unittest.TestCase):
         self.assertIn("LGHT1076 : ICE91: The file", policy)
         self.assertIn("testUserIsAdministrator", self.tests)
         self.assertIn("standardUserInstallEstablished", self.tests)
+
+    def test_com_queries_emit_only_rows_or_scalar_values(self):
+        policy = (ROOT / "Assert-MsiPolicy.ps1").read_text()
+        for script in (policy, self.tests):
+            self.assertIn("$null = $view.Execute()", script)
+            self.assertIn("$null = $view.Close()", script)
+            self.assertNotRegex(script, r"(?m)^\s*\$view\.(?:Execute|Close)\(\)")
+        self.assertIn("[pscustomobject]@{ Values = $values }", policy)
+
+    def test_warning_allowlist_rejects_unrelated_diagnostics(self):
+        policy = (ROOT / "Assert-MsiPolicy.ps1").read_text()
+        pattern = re.search(r'if \(\$line -notmatch "(.*)"\) \{', policy).group(1)
+        warning = ("Product.wxs(1) : warning LGHT1076 : ICE91: The file 'f123' will be "
+                   "installed to the per user directory 'AppInstallFolder' that doesn't "
+                   "vary based on ALLUSERS value. This file won't be copied to each "
+                   "user's profile even if a per machine installation is desired.")
+        self.assertRegex(warning, pattern)
+        self.assertRegex(warning.replace("doesn't", "does not"), pattern)
+        for bad in (warning.replace("ICE91", "ICE64"), warning.replace("LGHT1076", "LGHT9999"),
+                    warning.replace("The file", "The shortcut"), warning + " Extra diagnostic.",
+                    "arbitrary warning text"):
+            self.assertNotRegex(bad, pattern)
 
     def test_fixture_isolation_and_coverage(self):
         uuid.UUID(self.config["upgradeCode"])

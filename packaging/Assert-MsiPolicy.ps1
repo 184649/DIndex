@@ -21,7 +21,9 @@ function Assert-PerUserMsiPolicy {
         function Read-PolicyRows([string]$Query, [int]$Columns) {
             $view = $database.OpenView($Query)
             try {
-                $view.Execute()
+                # COM void methods may return values through the PowerShell adapter.
+                # Only the explicit row objects below may enter the success stream.
+                $null = $view.Execute()
                 while ($null -ne ($record = $view.Fetch())) {
                     try {
                         $values = @()
@@ -30,7 +32,7 @@ function Assert-PerUserMsiPolicy {
                     } finally { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($record) }
                 }
             } finally {
-                $view.Close()
+                $null = $view.Close()
                 $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($view)
             }
         }

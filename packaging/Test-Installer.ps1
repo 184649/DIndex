@@ -78,11 +78,11 @@ function Open-MsiDatabase([string]$Path) {
 function Get-MsiValue($Database, [string]$Sql) {
     $view = $Database.OpenView($Sql)
     try {
-        $view.Execute()
+        $null = $view.Execute()
         $row = $view.Fetch()
         if ($null -eq $row) { return $null }
         return $row.StringData(1)
-    } finally { $view.Close() }
+    } finally { $null = $view.Close() }
 }
 function Assert-PackagePolicy($Build) {
     $db = Open-MsiDatabase $Build.msiPath
