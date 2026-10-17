@@ -29,11 +29,42 @@ function Record-Pass([string]$Name) {
     $results.Add([pscustomobject]@{ name = $Name; result = 'passed' })
     Write-Host "PASS $Name"
 }
+function Write-MsiFailureDiagnostics([string]$LogPath) {
+    # Keep the full log on disk; CI gets at most 80 relevant lines without uploads.
+    if (-not (Test-Path -LiteralPath $LogPath -PathType Leaf)) {
+        Write-Host "MSI diagnostics unavailable: log was not created at $LogPath"
+        return
+    }
+    try {
+        $lines = @(Get-Content -LiteralPath $LogPath)
+        $indices = [Collections.Generic.SortedSet[int]]::new()
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match 'Return value 3|Error [0-9]+|MainEngineThread is returning|exception|failed|cannot') {
+                $first = [Math]::Max(0, $i - 6)
+                $last = [Math]::Min($lines.Count - 1, $i + 3)
+                for ($j = $first; $j -le $last; $j++) { $null = $indices.Add($j) }
+            }
+        }
+        # Prefer the last failure context when rollback also emitted errors.
+        $selected = @($indices | Select-Object -Last 60)
+        $tailStart = [Math]::Max(0, $lines.Count - 20)
+        if ($lines.Count -gt 0) { $selected += @($tailStart..($lines.Count - 1)) }
+        $selected = @($selected | Where-Object { $_ -ge 0 -and $_ -lt $lines.Count } | Sort-Object -Unique | Select-Object -Last 80)
+        Write-Host "--- MSI failure excerpt: $LogPath (full log retained; $($selected.Count) of $($lines.Count) lines) ---"
+        foreach ($index in $selected) { Write-Host ('{0}: {1}' -f ($index + 1), $lines[$index]) }
+        Write-Host '--- End MSI failure excerpt ---'
+    } catch {
+        Write-Warning "Cannot read MSI diagnostic log: $($_.Exception.Message)"
+    }
+}
 function Invoke-Msi([string]$Name, [string[]]$Arguments, [int[]]$Expected = @(0)) {
     $log = Join-Path $logs "$Name.log"
     $all = $Arguments + @('/qn', '/norestart', 'REBOOT=ReallySuppress', '/l*v', ('"' + $log + '"'))
     $process = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -ArgumentList $all -PassThru -Wait
-    if ($process.ExitCode -notin $Expected) { throw "MSI $Name returned $($process.ExitCode); expected $($Expected -join ','). Log: $log" }
+    if ($process.ExitCode -notin $Expected) {
+        Write-MsiFailureDiagnostics $log
+        throw "MSI $Name returned $($process.ExitCode); expected $($Expected -join ','). Log: $log"
+    }
     return $process.ExitCode
 }
 function Open-MsiDatabase([string]$Path) {

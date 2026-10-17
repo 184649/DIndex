@@ -33,11 +33,13 @@
     <Condition Message="This package requires Windows 10 version 1607 (build 14393) or later, or Windows Server 2016 or later. Use an edition still supported by Microsoft.">Installed OR (WINDOWS_MAJOR = "#10" AND WINDOWS_BUILD &gt;= 14393)</Condition>
     <Condition Message="This installer is current-user only. Do not set ALLUSERS.">NOT ALLUSERS</Condition>
 
-    <!-- Detection only. No WM_CLOSE, WM_ENDSESSION, elevation, termination or reboot. -->
+    <!-- Detection only. No WM_CLOSE, WM_ENDSESSION, elevation, termination or reboot.
+         WiX requires Timeout >= 1; with every close/end-session option disabled
+         this value does not request a shutdown or a termination wait. -->
     <util:CloseApplication Id="DetectRunningApp" Target="$(var.AppExe)"
                            Property="APP_RUNNING" CloseMessage="no" EndSessionMessage="no"
                            ElevatedCloseMessage="no" ElevatedEndSessionMessage="no"
-                           RebootPrompt="no" PromptToContinue="no" Timeout="0" />
+                           RebootPrompt="no" PromptToContinue="no" Timeout="1" />
     <CustomAction Id="RequireClosedApp" Error="Please quit $(var.AppName) completely (including its notification-area icon), then run setup again. Setup will never force-close it." />
     <InstallExecuteSequence>
       <Custom Action="WixCloseApplications" Before="InstallValidate">1</Custom>

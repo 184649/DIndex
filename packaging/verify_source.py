@@ -53,6 +53,7 @@ class PackagingContract(unittest.TestCase):
             self.assertEqual(self.product.find(f".//w:Feature[@Id='{feature}']", NS).get("Level"), "2")
         self.assertIsNotNone(core.find("w:ComponentRef[@Id='StartMenuShortcut']", NS))
         self.assertNotIn("LicenseAgreement", (ROOT / "PreviewUI.wxs").read_text())
+        self.assertIsNone(self.ui.find(".//w:Publish[@Dialog='FeaturesDlg'][@Control='Next']", NS))
 
     def test_running_app_detection_never_terminates(self):
         detector = self.product.find(".//u:CloseApplication", NS)
@@ -60,6 +61,7 @@ class PackagingContract(unittest.TestCase):
             self.assertEqual(detector.get(attribute), "no")
         self.assertIsNone(detector.get("TerminateProcess"))
         self.assertEqual(detector.get("Property"), "APP_RUNNING")
+        self.assertGreaterEqual(int(detector.get("Timeout", "5")), 1)
         self.assertEqual(self.product.find(".//w:Property[@Id='MSIRESTARTMANAGERCONTROL']", NS).get("Value"), "DisableShutdown")
         self.assertNotIn("Stop-Process", self.tests)
         self.assertNotIn("taskkill", self.tests.lower())
@@ -97,6 +99,8 @@ class PackagingContract(unittest.TestCase):
         for scenario in ("running-app-blocked", "running-repair-blocked", "running-upgrade-blocked", "running-uninstall-blocked", "install-v1", "repair-v1", "upgrade-v2", "reject-downgrade", "rollback-failed-upgrade", "uninstall-v2", "WIXFAILWHENDEFERRED=1", "Assert-Sentinel"):
             self.assertIn(scenario, self.tests)
         self.assertIn('<?if $(var.FixtureBuild) = 1 ?>', (ROOT / "Product.wxs").read_text())
+        self.assertIn("Write-MsiFailureDiagnostics $log", self.tests)
+        self.assertIn("Select-Object -Last 80", self.tests)
 
 
 if __name__ == "__main__":
