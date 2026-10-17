@@ -80,9 +80,11 @@ All WiX/MSI ICE validation remains enabled. Candle treats every warning as an er
 This is not a blanket LGHT1076 or ICE91 suppression. Even another ICE91 message category is rejected. Microsoft [documents ICE91 as harmless for a package used exclusively per-user](https://learn.microsoft.com/en-us/windows/win32/msi/ice91). Before accepting it, `Assert-MsiPolicy.ps1` examines the actual linked MSI and requires:
 
 - Explicit `perUser`/`limited` authoring and the linked package’s no-elevation summary flag
-- No authored `ALLUSERS` or `MSIINSTALLPERUSER` value, with launch conditions rejecting either override
+- No authored `ALLUSERS` or `MSIINSTALLPERUSER` value, with `NOT ALLUSERS` rejecting an effective per-machine scope and an additional `NOT MSIINSTALLPERUSER` guard
 - A private, mixed-case `AppInstallFolder` directory fixed beneath the current user’s `LocalAppDataFolder/Programs`; no public destination directory properties
 - Every component beneath that application directory or the current user’s Start menu/Desktop/Startup directory, plus HKCU-only registry writes
+
+Windows Installer ignores `MSIINSTALLPERUSER` when `ALLUSERS` is not `2`. Supplying that property alone can therefore succeed without changing scope; its presence on the command line is not guaranteed to trigger rejection. The manifest records this behavior rather than claiming all property overrides are rejected. Tests verify the resulting registration is current-user unmanaged only and files remain at the fixed current-user path.
 
 The ordinary command-line `INSTALLFOLDER=...` property cannot redirect the private directory. Altering a package using an external MSI transform is outside the supported installer contract. The manifest stores the mechanically checked policy, the exact allowlist, the number of accepted warnings and the full validation-log path. A nonzero accepted warning count must not be described as “zero warnings”. Both initial Windows linking attempts reported only this expected file warning (478 occurrences); later builds record their own counts.
 
@@ -101,7 +103,7 @@ python ./packaging/verify_source.py
 
 Tests build synthetic versions `1.1.0`, `1.1.1`, `1.1.2` with one random fixture UpgradeCode and verify:
 
-1. Per-user/limited-privilege/x64 MSI metadata, optional-feature defaults and transaction sequencing; actual `ALLUSERS=1` and `MSIINSTALLPERUSER=1` rejection before creating files or registration
+1. Per-user/limited-privilege/x64 MSI metadata, optional-feature defaults and transaction sequencing; actual `ALLUSERS=1` rejection before creating files or registration, plus successful `MSIINSTALLPERUSER=1` installation constrained to the same current-user context/path, followed by fixture cleanup
 2. Running-process rejection before install, repair, upgrade and uninstall, without terminating the process
 3. Clean install, complete bundled runtime, Start menu target and Windows Installer current-user unmanaged registration with the expected installed version
 4. No desktop/startup shortcut without opt-in; explicit opt-in and feature retention on upgrade
@@ -122,6 +124,9 @@ Each MSI operation has a verbose log. `test-results-<GUID>.json` records passed 
 Use a clean, supported Windows x64 VM with a standard user account and no separately installed .NET runtime. Check the wizard and maintenance UI, Windows Apps registration, first launch, loading/saving the isolated Preview profile, explicit app exit, optional shortcuts and startup behavior. Repeat the MSI upgrade/rollback/data-retention cases. Verify the shipping MSI has no fixture failure action and that its included runtime version matches the reviewed security-serviced version. Code-signing, publisher reputation and a reliable distribution channel remain separate release prerequisites.
 
 ## Design references
+
+- [MSIINSTALLPERUSER is ignored unless ALLUSERS is 2](https://learn.microsoft.com/en-us/windows/win32/msi/msiinstallperuser)
+- [ALLUSERS scope semantics and per-user launch-condition example](https://learn.microsoft.com/en-us/windows/win32/msi/allusers)
 
 - [Official ProductsEx COM sample and empty machine SID](https://github.com/microsoft/Windows-classic-samples/blob/main/Samples/Win7Samples/sysmgmt/msi/scripts/WiLstPrdEx.vbs)
 - [Windows Installer ProductsEx enumeration](https://learn.microsoft.com/en-us/windows/win32/msi/installer-productsex)

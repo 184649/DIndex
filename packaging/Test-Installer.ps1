@@ -211,14 +211,25 @@ try {
     $sentinelContent = "Must survive repair, upgrade, rollback and uninstall: $fixtureId"
     [IO.File]::WriteAllText($sentinel, $sentinelContent)
 
-    foreach ($override in @('ALLUSERS=1', 'MSIINSTALLPERUSER=1')) {
-        $name = 'reject-' + $override.Split('=')[0].ToLowerInvariant()
-        $null = Invoke-Msi $name @('/i', ('"' + $v1.msiPath + '"'), $override) @(1603)
-        Assert-True (-not (Test-Path $installPath)) "$override rejection created an installation directory."
-        Assert-ProductRegistration $v1 $false "$override rejection"
-        Assert-Sentinel
-        Record-Pass "$override is rejected before installation"
-    }
+    $null = Invoke-Msi 'reject-allusers' @('/i', ('"' + $v1.msiPath + '"'), 'ALLUSERS=1') @(1603)
+    Assert-True (-not (Test-Path $installPath)) 'ALLUSERS=1 rejection created an installation directory.'
+    Assert-ProductRegistration $v1 $false 'ALLUSERS=1 rejection'
+    Assert-Sentinel
+    Record-Pass 'ALLUSERS=1 is rejected before installation'
+
+    # Windows Installer ignores MSIINSTALLPERUSER unless ALLUSERS=2. Verify
+    # the effective scope and fixed destination, not an invalid rejection premise.
+    # https://learn.microsoft.com/en-us/windows/win32/msi/msiinstallperuser
+    $null = Invoke-Msi 'msiinstallperuser-fixed-scope' @('/i', ('"' + $v1.msiPath + '"'), 'MSIINSTALLPERUSER=1')
+    Assert-Installed $v1
+    Assert-True (-not (Test-Path $desktopLink) -and -not (Test-Path $startupLink)) 'Scope-property probe enabled optional shortcuts.'
+    Assert-Sentinel
+    Record-Pass 'MSIINSTALLPERUSER=1 leaves fixed current-user scope, path and defaults intact'
+    $null = Invoke-Msi 'cleanup-scope-probe' @('/x', $v1.productCode)
+    Assert-ProductRegistration $v1 $false 'Scope probe uninstall'
+    Assert-True (-not (Test-Path $installPath)) 'Scope-probe uninstall left its managed installation directory.'
+    Assert-True (-not (Test-Path $startLink) -and -not (Test-Path $desktopLink) -and -not (Test-Path $startupLink)) 'Scope-probe uninstall left a shortcut.'
+    Assert-Sentinel
 
     # The guard fixture is a tiny managed executable that exits by itself. It does not
     # launch the real app, open a profile, or need a forced stop even on test failure.

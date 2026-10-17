@@ -148,6 +148,18 @@ class PackagingContract(unittest.TestCase):
         self.assertLess(preflight, build)
         self.assertIn("productCode = [guid]::NewGuid().ToString('B').ToUpperInvariant()", self.tests)
 
+    def test_scope_probe_checks_effective_context_not_ignored_property_rejection(self):
+        policy = (ROOT / "Assert-MsiPolicy.ps1").read_text()
+        self.assertNotIn("rejectsMsiInstallPerUserOverride", policy)
+        self.assertIn("msiInstallPerUserBehavior", policy)
+        self.assertIn("Invoke-Msi 'reject-allusers'", self.tests)
+        self.assertIn("Invoke-Msi 'msiinstallperuser-fixed-scope'", self.tests)
+        self.assertIn("Assert-ProductRegistration $v1 $false 'Scope probe uninstall'", self.tests)
+        probe = self.tests[self.tests.index("Invoke-Msi 'msiinstallperuser-fixed-scope'"):self.tests.index("# The guard fixture")]
+        self.assertIn("Assert-Installed $v1", probe)
+        self.assertIn("-not (Test-Path $installPath)", probe)
+        self.assertIn("Assert-Sentinel", probe)
+
     def test_fixture_isolation_and_coverage(self):
         uuid.UUID(self.config["upgradeCode"])
         self.assertTrue(self.config["installFolder"].endswith("-Preview"))

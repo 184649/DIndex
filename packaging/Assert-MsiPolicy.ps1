@@ -43,7 +43,7 @@ function Assert-PerUserMsiPolicy {
         }
         $conditions = @((Read-PolicyRows 'SELECT `Condition` FROM `LaunchCondition`' 1) | ForEach-Object { $_.Values[0].Trim() })
         foreach ($required in @('NOT ALLUSERS', 'NOT MSIINSTALLPERUSER')) {
-            if ($required -notin $conditions) { throw "Missing scope-override rejection: $required" }
+            if ($required -notin $conditions) { throw "Missing effective-scope guard: $required" }
         }
         $summary = $database.SummaryInformation(0)
         try {
@@ -86,7 +86,8 @@ function Assert-PerUserMsiPolicy {
         }
         [pscustomobject]@{
             perUserOnly = $true; limitedPrivileges = $true; rejectsAllUsers = $true
-            rejectsMsiInstallPerUserOverride = $true; privateFixedInstallDirectory = $true
+            msiInstallPerUserBehavior = 'Ignored by Windows Installer when ALLUSERS is not 2; fixed per-user scope required'
+            msiInstallPerUserGuardAuthored = $true; privateFixedInstallDirectory = $true
             componentDirectoriesValidated = $componentCount; registryWrites = 'HKCU only'
         }
     } finally {
