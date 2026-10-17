@@ -45,7 +45,7 @@ Prerequisites must already exist:
 - Official .NET SDK matching the target framework (normally .NET 10; .NET 8 is accepted for an explicit compatibility build)
 - Official WiX **3.14.1.8722**, including `candle.exe`, `light.exe`, `WixUIExtension.dll` and `WixUtilExtension.dll`
 
-The scripts detect these tools and fail if they are absent. They never install an SDK, WiX or a third-party build tool. Ordinary NuGet restore is limited to the official NuGet source to retrieve Microsoft runtime dependencies. The preinstalled SDK builds a **self-contained .NET 10.0.13** payload by default (`8.0.32` for an explicitly selected .NET 8 target), independent of an older shared runtime on the build machine. Review and update those pins for future security servicing.
+The scripts detect these tools and fail if they are absent. WiX detection compares the exact reported `FileVersion` string `3.14.1.8722`, using one shared detector for the launcher and installer build. The official WiX native version resource encodes its numeric tuple differently (`3.14.8722.0`); it is logged for diagnosis, not misinterpreted as a different package version. Each candidate logs file, product and numeric versions, and the build manifest records all four tool/extension components. They never install an SDK, WiX or a third-party build tool. Ordinary NuGet restore is limited to the official NuGet source to retrieve Microsoft runtime dependencies. The preinstalled SDK builds a **self-contained .NET 10.0.13** payload by default (`8.0.32` for an explicitly selected .NET 8 target), independent of an older shared runtime on the build machine. Review and update those pins for future security servicing.
 
 ```powershell
 $build = ./packaging/Build-Installer.ps1 `

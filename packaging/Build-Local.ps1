@@ -14,30 +14,7 @@ $exitCode = 1
 $transcriptStarted = $false
 $buildDirectory = $null
 
-function Find-PreinstalledWix {
-    $candidates = @($WixBin)
-    if ($env:WIX) { $candidates += Join-Path $env:WIX 'bin' }
-    $candle = Get-Command candle.exe -ErrorAction SilentlyContinue
-    if ($candle) { $candidates += Split-Path $candle.Source -Parent }
-    if (${env:ProgramFiles(x86)}) { $candidates += Join-Path ${env:ProgramFiles(x86)} 'WiX Toolset v3.14\bin' }
-    foreach ($candidate in ($candidates | Where-Object { $_ } | Select-Object -Unique)) {
-        $valid = $true
-        foreach ($name in @('candle.exe', 'light.exe')) {
-            $path = Join-Path $candidate $name
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { $valid = $false; break }
-            $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($path)
-            if ($version.FileMajorPart -ne 3 -or $version.FileMinorPart -ne 14 -or
-                $version.FileBuildPart -ne 1 -or $version.FilePrivatePart -ne 8722) {
-                $valid = $false; break
-            }
-        }
-        foreach ($name in @('WixUIExtension.dll', 'WixUtilExtension.dll')) {
-            if (-not (Test-Path -LiteralPath (Join-Path $candidate $name) -PathType Leaf)) { $valid = $false }
-        }
-        if ($valid) { return (Resolve-Path -LiteralPath $candidate).Path }
-    }
-    return $null
-}
+. (Join-Path $PSScriptRoot 'Find-WixToolset.ps1')
 
 try {
     if (-not $OutputDirectory) {
@@ -71,7 +48,7 @@ try {
             $problems.Add('正式版の .NET 10 SDK が必要です。https://dotnet.microsoft.com/download/dotnet/10.0')
         } else { Write-Host ('検出した .NET 10 SDK: ' + (($sdkLines | Where-Object { $_ -match '^10\.0\.\d+\s' }) -join '; ')) }
     }
-    $resolvedWix = Find-PreinstalledWix
+    $resolvedWix = Find-PreinstalledWix -WixBin $WixBin
     if (-not $resolvedWix) {
         $problems.Add('既設の WiX 3.14.1.8722 (candle.exe / light.exe / UI・Util 拡張) が必要です。https://github.com/wixtoolset/wix3/releases/tag/wix3141rtm')
     } else { Write-Host "WiX 3.14.1.8722: $resolvedWix" }

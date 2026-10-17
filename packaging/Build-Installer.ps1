@@ -42,25 +42,21 @@ function Invoke-Checked([string]$Executable, [string[]]$Arguments) {
     & $Executable @Arguments | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "$Executable failed with exit code $LASTEXITCODE" }
 }
-function Find-WixBin {
-    $candidates = @($WixBin)
-    if ($env:WIX) { $candidates += Join-Path $env:WIX 'bin' }
-    $candleCommand = Get-Command candle.exe -ErrorAction SilentlyContinue
-    if ($candleCommand) { $candidates += Split-Path $candleCommand.Source -Parent }
-    if (${env:ProgramFiles(x86)}) { $candidates += Join-Path ${env:ProgramFiles(x86)} 'WiX Toolset v3.14\bin' }
-    foreach ($candidate in ($candidates | Where-Object { $_ } | Select-Object -Unique)) {
-        if ((Test-Path (Join-Path $candidate 'candle.exe')) -and (Test-Path (Join-Path $candidate 'light.exe'))) {
-            $v = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $candidate 'candle.exe'))
-            if ($v.FileMajorPart -ne 3 -or $v.FileMinorPart -ne 14 -or $v.FileBuildPart -ne 1 -or $v.FilePrivatePart -ne 8722) { continue }
-            foreach ($extension in @('WixUIExtension.dll','WixUtilExtension.dll')) {
-                if (-not (Test-Path (Join-Path $candidate $extension))) { throw "Missing preinstalled $extension in $candidate" }
-            }
-            return (Resolve-Path $candidate).Path
+. (Join-Path $PSScriptRoot 'Find-WixToolset.ps1')
+$WixBin = Find-PreinstalledWix -WixBin $WixBin
+if (-not $WixBin) {
+    throw 'Preinstalled official WiX 3.14.1.8722 candle.exe, light.exe and UI/Util extensions are required. See the component metadata diagnostics above. This script never installs tools.'
+}
+$wixComponents = @(
+    foreach ($name in @('candle.exe', 'light.exe', 'WixUIExtension.dll', 'WixUtilExtension.dll')) {
+        $path = Join-Path $WixBin $name
+        $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($path)
+        [pscustomobject]@{
+            name = $name; path = $path; fileVersion = $version.FileVersion; productVersion = $version.ProductVersion
+            numericFileVersion = "$($version.FileMajorPart).$($version.FileMinorPart).$($version.FileBuildPart).$($version.FilePrivatePart)"
         }
     }
-    throw 'Preinstalled official WiX 3.14.1.8722 candle.exe, light.exe and UI/Util extensions are required. This script never installs tools.'
-}
-$WixBin = Find-WixBin
+)
 $dotnet = (Get-Command dotnet.exe -ErrorAction Stop).Source
 $sdkLines = & $dotnet --list-sdks
 if ($LASTEXITCODE -ne 0) { throw 'Cannot enumerate the preinstalled .NET SDKs.' }
@@ -232,6 +228,7 @@ $result = [ordered]@{
     msiPath = $msi; sha256 = (Get-FileHash $msi -Algorithm SHA256).Hash; payloadDirectory = $payload
     wixSourceArchive = $sourceArchive; wixSourceUrl = $sourceUrl; wixSourceSha256 = (Get-FileHash $sourceArchive -Algorithm SHA256).Hash
     sdk = $sdkVersion; targetFramework = $TargetFramework; wix = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $WixBin 'candle.exe')).FileVersion
+    wixComponents = $wixComponents
     includedFrameworks = $runtime.runtimeOptions.includedFrameworks
     runtimeFrameworkVersion = $RuntimeFrameworkVersion
     coreClrFileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $payload 'coreclr.dll')).FileVersion

@@ -76,7 +76,12 @@ class PackagingContract(unittest.TestCase):
         self.assertIn("'10.0.13'", self.build)
 
     def test_official_tool_detection_and_notice_bundle(self):
-        self.assertIn("$v.FilePrivatePart -ne 8722", self.build)
+        self.assertIn("Find-WixToolset.ps1", self.build)
+        self.assertIn("Find-PreinstalledWix -WixBin $WixBin", self.build)
+        detector = (ROOT / "Find-WixToolset.ps1").read_text()
+        self.assertIn("3.14.1.8722", detector)
+        self.assertNotIn("$version.FileBuildPart -ne 1", detector)
+        self.assertIn("numericFileVersion", self.build)
         self.assertIn("b40e9a32c24033e11b77baf2c91a704382f898ed", self.build)
         self.assertIn("-p:RestoreSources=https://api.nuget.org/v3/index.json", self.build)
         self.assertIn("WiX-LICENSE.TXT", self.build)

@@ -15,7 +15,7 @@
 - Windows 10/11 x64
 - [Microsoft 公式 .NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)。Desktop Runtime だけではビルドできません
 - [Microsoft 公式 PowerShell 7.2 以降](https://learn.microsoft.com/powershell/scripting/install/install-powershell-on-windows)。Windows 標準の PowerShell 5.1 とは異なります
-- [WiX Toolset 3.14.1](https://github.com/wixtoolset/wix3/releases/tag/wix3141rtm)。`candle.exe` と `light.exe` のファイルバージョンが **3.14.1.8722** で、`WixUIExtension.dll`・`WixUtilExtension.dll` が必要です
+- [WiX Toolset 3.14.1](https://github.com/wixtoolset/wix3/releases/tag/wix3141rtm)。`candle.exe` と `light.exe` の FileVersion 文字列が **3.14.1.8722** で、`WixUIExtension.dll`・`WixUtilExtension.dll` が必要です。WiX のネイティブ数値欄は `3.14.8722.0` になるため、版の確認には文字列欄を使います
 - NuGet の公式 .NET ランタイム依存ファイルと、ライセンス用 WiX ソース ZIP を取得できるインターネット接続
 
 不足している場合は、公式案内へのリンクとログを残して中止します。ツールを自動インストールしたり、実行ポリシーを変更したり、管理者へ昇格したりしません。PC のポリシーでスクリプト実行が禁止されている場合は、管理者へ確認してください。警告やポリシーを回避する操作は案内しません。
@@ -78,7 +78,7 @@ pwsh -NoProfile -File .\packaging\Build-Local.ps1 -NonInteractive -OutputDirecto
 ## 失敗したとき
 
 - 最初に表示される起動ログ: `%LOCALAPPDATA%\DApps-Preview-Builds\logs\DIndex-bootstrap-*.log`。PowerShell 不足やスクリプト読み込み前のエラーも残します
-- 出力先内の `build.log`: 事前確認とビルドの詳細。失敗時は `BUILD-FAILED.txt` も作成します
+- 出力先内の `build.log`: 事前確認とビルドの詳細。失敗時は `BUILD-FAILED.txt` も作成します。WiX 検出では、確認したフルパス・不足ファイル・FileVersion / ProductVersion 文字列・数値版を記録します
 - 出力先内の `local-build.json`: 成功時の MSI・payload・確認用データ・ログのパスと、ビルド情報
 - `build-<GUID>\build-manifest.json`: SDK / WiX / ランタイム版と MSI の SHA-256
 
