@@ -16,6 +16,7 @@ internal static class Program
             ("search matches baseline across sizes, scopes and Unicode", SearchEquivalence),
             ("blank/small/large/empty search cancellation", SearchCancellation),
             ("snapshots are immutable and reusable", SnapshotReuse),
+            ("bounded recent cache preserves limits, ties, cancellation and generations", EmptyCacheTests.Run),
             ("cached records are filtered by current settings", CacheScope),
             ("single-root traversal covers all descendants", Traversal),
             ("excluded ancestors and reparse cycles", ExclusionsAndLinks),

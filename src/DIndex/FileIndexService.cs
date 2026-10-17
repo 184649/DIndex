@@ -265,17 +265,13 @@ public sealed class FileIndexService : IDisposable
         cancellationToken.ThrowIfCancellationRequested();
         try
         {
-            var values = Volatile.Read(ref _snapshot).Records;
+            var snapshot = Volatile.Read(ref _snapshot);
+            var values = snapshot.Records;
             keyword = (keyword ?? string.Empty).Trim();
             List<SearchRecord> result;
             if (string.IsNullOrWhiteSpace(keyword))
             {
-                result = values.OrderByDescending(x =>
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        return x.UpdatedTicks;
-                    }, new CancelableComparer<long>(cancellationToken))
-                    .Take(limit).ToList();
+                result = RecentResults(snapshot, limit, cancellationToken);
             }
             else
             {
@@ -317,6 +313,46 @@ public sealed class FileIndexService : IDisposable
             throw new OperationCanceledException(cancellationToken);
         }
     }
+
+    private static List<SearchRecord> RecentResults(PublishedSnapshot snapshot, int limit, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        if (limit <= 0) return new List<SearchRecord>();
+        if (limit > 500) return SortRecent(snapshot.Records, limit, token);
+        var required = Math.Min(limit, snapshot.Records.Length);
+        var cached = Volatile.Read(ref snapshot.RecentTop500);
+        if (cached is null || cached.Length < required)
+        {
+            // One cold computation at a time per immutable generation, retaining at most 500.
+            // A smaller limit computes only its requested prefix; later larger requests can upgrade.
+            // Waiting queries can cancel; cancellation/failure never caches a partial result.
+            snapshot.RecentBuildGate.Wait(token);
+            try
+            {
+                cached = Volatile.Read(ref snapshot.RecentTop500);
+                if (cached is null || cached.Length < required)
+                {
+                    cached = SortRecent(snapshot.Records, limit, token).ToArray();
+                    token.ThrowIfCancellationRequested();
+                    Volatile.Write(ref snapshot.RecentTop500, cached);
+                }
+            }
+            finally { snapshot.RecentBuildGate.Release(); }
+        }
+        token.ThrowIfCancellationRequested();
+        var count = Math.Min(limit, cached.Length);
+        var result = new List<SearchRecord>(count);
+        for (var i = 0; i < count; i++) result.Add(cached[i]);
+        token.ThrowIfCancellationRequested();
+        return result;
+    }
+
+    private static List<SearchRecord> SortRecent(SearchRecord[] records, int limit, CancellationToken token)
+        => records.OrderByDescending(record =>
+        {
+            token.ThrowIfCancellationRequested();
+            return record.UpdatedTicks;
+        }, new CancelableComparer<long>(token)).Take(limit).ToList();
 
     private sealed class CancelableComparer<T>(CancellationToken token) : IComparer<T>
     {
@@ -743,6 +779,9 @@ public sealed class FileIndexService : IDisposable
 
     private sealed class PublishedSnapshot(SearchRecord[] records, long version)
     {
+        // Immutable, completed prefixes only. Old generations stay alive while a search uses them.
+        public SearchRecord[]? RecentTop500;
+        public SemaphoreSlim RecentBuildGate { get; } = new(1, 1);
         public SearchRecord[] Records { get; } = records;
         public ReadOnlyCollection<SearchRecord> View { get; } = Array.AsReadOnly(records);
         public long Version { get; } = version;

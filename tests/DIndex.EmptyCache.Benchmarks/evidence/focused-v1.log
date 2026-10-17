@@ -1,0 +1,18 @@
+Cold first-generation complete
+Warm repeated complete
+(cold_first_generation, develop, 500): median=102.397 ms; p95=121.853 ms; alloc=28,004,389; gc2_samples=0
+(cold_first_generation, current_uncached, 500): median=36.706 ms; p95=42.130 ms; alloc=20,004,450; gc2_samples=0
+(cold_first_generation, lazy_top500, 500): median=37.133 ms; p95=41.942 ms; alloc=20,012,539; gc2_samples=0
+(warm_seed, develop, 500): median=101.270 ms; p95=101.270 ms; alloc=28,004,400; gc2_samples=0
+(warm_seed, current_uncached, 500): median=35.888 ms; p95=35.888 ms; alloc=20,004,392; gc2_samples=0
+(warm_seed, lazy_top500, 500): median=36.988 ms; p95=36.988 ms; alloc=20,012,504; gc2_samples=0
+(warm_repeated, develop, 500): median=104.018 ms; p95=406.019 ms; alloc=28,004,419; gc2_samples=3
+(warm_repeated, current_uncached, 500): median=38.889 ms; p95=40.770 ms; alloc=20,004,392; gc2_samples=0
+(warm_repeated, lazy_top500, 500): median=0.004 ms; p95=0.017 ms; alloc=4,096; gc2_samples=0
+(after_publication, develop, 500): median=100.585 ms; p95=398.489 ms; alloc=28,004,461; gc2_samples=3
+(after_publication, current_uncached, 500): median=36.079 ms; p95=43.467 ms; alloc=20,004,392; gc2_samples=0
+(after_publication, lazy_top500, 500): median=36.472 ms; p95=375.829 ms; alloc=20,012,571; gc2_samples=3
+(cold_small_limit, current_uncached, 1): median=29.244 ms; p95=30.351 ms; alloc=20,000,400; gc2_samples=0
+(cold_small_limit, lazy_top500, 1): median=37.762 ms; p95=40.386 ms; alloc=20,008,512; gc2_samples=0
+(cold_small_limit, current_uncached, 50): median=36.283 ms; p95=39.683 ms; alloc=20,000,792; gc2_samples=0
+(cold_small_limit, lazy_top500, 50): median=36.044 ms; p95=40.534 ms; alloc=20,009,038; gc2_samples=0

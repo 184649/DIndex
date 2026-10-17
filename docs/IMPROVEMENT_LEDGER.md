@@ -39,8 +39,8 @@
 
 ## 2026-10-17 初期実装検証
 
-- production sourceを直接リンクする索引コア28/28、保存・更新93/93のLinux C#試験を通過。
-- 初期commit c6b6e6c のWindows CIは本体/更新器ビルド（警告0・エラー0）、索引24実行＋ACL 1 skip、保存81試験を通過。最新追加分は次commitのCIで再確認。GUI/Shellの実操作は未確認。
+- production sourceを直接リンクする索引コア29/29、保存・更新93/93のLinux C#試験を通過。
+- commit 3d5a9ce のWindows CIは本体/更新器ビルド（警告0・エラー0）、索引27実行＋ACL 1 skip、保存93試験を通過。空検索cacheの追加分は最終commitのCIで再確認。GUI/Shellの実操作は未確認。
 - C#構文解析19ファイルでsyntax errorなし、XAML/project XML構造検査通過。これはWindows semantic buildの代替ではありません。
 - 固定sourceの100万件・30反復比較では選択的検索が約3倍。一方、全path一致の中央値7.5%遅化と空検索p95悪化を記録。詳細と採否は PERFORMANCE.md を参照。実アプリ体感の保証値ではありません。
 - 同じ検索範囲の再索引では旧snapshotを保持。検索範囲を変えた場合は旧世代を停止して対象を先に絞り、取消されても削除済み対象を復活させません。
@@ -54,3 +54,8 @@
 - 開発版は本番profileから分離し、自動更新対象外。通常版のsilent更新確認はballoonにとどめる。
 - 更新器は検証・同volume stagingが終わってreadyを返した後、proceedをcommit pointとして本体終了。準備失敗なら本体を閉じない。
 - 設定ファイルの外部編集を終了時に上書きしない。保存前の外部変更・削除・競合検知を実装し、回帰試験を通過。
+
+### 空検索の最終採用
+
+- 世代内の要求prefixを最大500件だけ保持するcacheを採用。通常CIに151 assertionsの回帰群を追加。Linuxは29群成功。
+- 同世代の反復検索を大幅に短縮する一方、初回・更新直後のsortと一時割当は残ります。v1/v2の不利結果も PERFORMANCE.md と再現データへ保存しました。

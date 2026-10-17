@@ -1,0 +1,11 @@
+phase,engine,limit,samples,median_ms,p95_ms,median_allocated,median_cpu_ms,gen2_samples,gen2_median_ms,non_gen2_median_ms
+cold_requested_limit,current_uncached,1,10,30.70125,40.5233,20000400.0,30.0,0,,30.70125
+cold_requested_limit,requested_top500_v2,1,10,30.9093,35.8232,20000528.0,30.0,0,,30.9093
+cold_requested_limit,current_uncached,50,10,36.449349999999995,38.3743,20000792.0,30.000050000000556,0,,36.449349999999995
+cold_requested_limit,requested_top500_v2,50,10,36.1222,44.8786,20001704.0,40.0,0,,36.1222
+cold_requested_limit,current_uncached,500,10,35.700599999999994,39.2968,20004584.0,40.0,0,,35.700599999999994
+cold_requested_limit,requested_top500_v2,500,10,35.463300000000004,39.2847,20012696.0,40.0,0,,35.463300000000004
+warm_repeated_500,current_uncached,500,30,39.79905,46.7389,20004392.0,40.0,1,359.8225,39.7927
+warm_repeated_500,requested_top500_v2,500,30,0.0049,0.0145,4096.0,0.0,0,,0.0049
+after_publication_500,current_uncached,500,10,37.87805,44.4321,20004392.0,40.0,0,,37.87805
+after_publication_500,requested_top500_v2,500,10,39.6438,45.8579,20012504.0,40.0,0,,39.6438

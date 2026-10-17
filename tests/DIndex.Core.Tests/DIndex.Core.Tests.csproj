@@ -10,6 +10,7 @@
     <Compile Include="../../src/DIndex/FileIndexService.cs" Link="FileIndexService.cs" />
     <Compile Include="../../src/DIndex/Models.cs" Link="Models.cs" />
     <Compile Include="Program.cs" />
+    <Compile Include="EmptyCacheTests.cs" />
     <Compile Include="ClipboardStub.cs" />
   </ItemGroup>
 </Project>
