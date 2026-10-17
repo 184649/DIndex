@@ -14,7 +14,7 @@ Date: 2026-10-17. Baseline source: published commit `9dfa31626f37530f9e0215b19bf
 
 ## Deterministic regressions
 
-The final core executable has 39 passing cases, 0 skipped on this host: the existing 29 cases plus ten preview/selective-policy cases. The new cases use an explicit progress-callback barrier rather than guessing whether disk traversal is still running.
+The final core executable has 40 passing cases, 0 skipped on this host: the existing 29 cases plus ten preview/selective-policy cases and a cross-platform fixture-path regression. The new cases use an explicit progress-callback barrier rather than guessing whether disk traversal is still running.
 
 1. First 512 results are searchable while the scan task is blocked; the next preview includes all 1,400 discovered records; prior readers remain immutable; final create/update/delete replay matches the filesystem without duplicate paths.
 2. Cancellation after preview restores cached records and the correct dirty state.
@@ -26,6 +26,7 @@ The final core executable has 39 passing cases, 0 skipped on this host: the exis
 8. A canceled async cache restore that supersedes a preview cannot leave that canceled preview published.
 9. An unchanged, nonempty scope performs no redundant preview publication; its old watcher still exposes changes while the rebuild is blocked.
 10. Scope expansion preserves old results and makes new-root matches searchable before traversal completes.
+11. Test fixture paths canonicalize nested separators and dot segments exactly like indexed FileInfo.FullName paths. This catches the mixed-separator expectation bug exposed by Windows CI; strict scope comparisons remain in place and now report expected, actual, missing, and unexpected paths.
 
 `initial-results-core-test.log` contains the final run. Use `run-core-tests.sh` for the existing .NET 8 core-only runner or the normal .NET 10 test project where installed. Linux core verification does not validate WPF, Windows ACLs, or the production Windows installer.
 

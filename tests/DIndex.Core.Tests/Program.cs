@@ -19,6 +19,7 @@ internal static class Program
             ("bounded recent cache preserves limits, ties, cancellation and generations", EmptyCacheTests.Run),
             ("cached records are filtered by current settings", CacheScope),
             ("single-root traversal covers all descendants", Traversal),
+            ("preview test fixture paths are canonical on every platform", ProgressiveIndexTests.FixturePathsAreCanonical),
             ("bounded previews are searchable before scan completion and reconcile changes", ProgressiveIndexTests.SearchableBeforeCompletion),
             ("canceling a preview restores the prior snapshot", ProgressiveIndexTests.CancelRestoresBaseline),
             ("superseded previews cannot overwrite or leak old scope", ProgressiveIndexTests.SupersededPreviewAndScope),

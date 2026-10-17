@@ -5,6 +5,17 @@ using DIndex;
 
 internal static class ProgressiveIndexTests
 {
+    public static Task FixturePathsAreCanonical()
+    {
+        using var tree = new Tree();
+        // '/' is accepted on Windows, while '..' also exposes unnormalized fixture paths on Unix.
+        var path = tree.Write("nested/../nested/leaf.txt");
+        var expected = Path.GetFullPath(Path.Combine(tree.Root, "nested", "leaf.txt"));
+        Equal(new[] { expected }, new[] { path }, "Fixture paths must be canonical on every platform");
+        Equal(new[] { SearchRecord.FromFile(path).FullPath }, new[] { path }, "Fixture and indexed record must use the same path representation");
+        return Task.CompletedTask;
+    }
+
     public static async Task SearchableBeforeCompletion()
     {
         using var tree = new Tree();
@@ -229,7 +240,21 @@ internal static class ProgressiveIndexTests
         while (!condition()) { if (timer.Elapsed > TimeSpan.FromSeconds(10)) throw new Exception("Timeout: " + reason); await Task.Delay(10); }
     }
     private static void Assert(bool condition, string message) { if (!condition) throw new Exception(message); }
-    private static void Equal(IEnumerable<string> expected, IEnumerable<string> actual, string message) => Assert(expected.SequenceEqual(actual), message);
+    private static void Equal(IEnumerable<string> expected, IEnumerable<string> actual, string message)
+    {
+        var expectedPaths = expected.ToArray();
+        var actualPaths = actual.ToArray();
+        if (expectedPaths.SequenceEqual(actualPaths, StringComparer.Ordinal)) return;
+        var missing = expectedPaths.Except(actualPaths, StringComparer.Ordinal).ToArray();
+        var unexpected = actualPaths.Except(expectedPaths, StringComparer.Ordinal).ToArray();
+        var details = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            expectedCount = expectedPaths.Length, actualCount = actualPaths.Length,
+            expected = expectedPaths.Take(10).ToArray(), actual = actualPaths.Take(10).ToArray(),
+            missing = missing.Take(10).ToArray(), unexpected = unexpected.Take(10).ToArray()
+        });
+        throw new Exception($"{message}: {details}");
+    }
     private sealed class BlockedScan : IDisposable
     {
         private readonly ManualResetEventSlim _entered = new();
@@ -243,7 +268,7 @@ internal static class ProgressiveIndexTests
     {
         public string Root { get; } = Path.Combine(Path.GetTempPath(), "dindex-preview-" + Guid.NewGuid().ToString("N"));
         public Tree() => Directory.CreateDirectory(Root);
-        public string Write(string relative, string value = "fixture") { var path = Path.Combine(Root, relative); Directory.CreateDirectory(Path.GetDirectoryName(path)!); File.WriteAllText(path, value); return path; }
+        public string Write(string relative, string value = "fixture") { var path = Path.GetFullPath(Path.Combine(Root, relative)); Directory.CreateDirectory(Path.GetDirectoryName(path)!); File.WriteAllText(path, value); return path; }
         public AppSettings InitialDirectorySettings() { var settings = Settings(); settings.IncludeDirectories = true; return settings; }
         public AppSettings Settings(params string[] excludes) => new() { SearchRoots = new() { Root }, IncludeDirectories = false, ExcludeFolderNames = excludes.ToList() };
         public void Dispose() { try { Directory.Delete(Root, true); } catch (IOException) { } }
