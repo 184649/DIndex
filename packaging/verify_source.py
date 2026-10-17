@@ -128,6 +128,18 @@ class PackagingContract(unittest.TestCase):
                     "arbitrary warning text"):
             self.assertNotRegex(bad, pattern)
 
+    def test_registration_uses_supported_context_api(self):
+        self.assertNotIn("CurrentVersion\\Uninstall", self.tests)
+        for required in ("ProductsEx($ProductCode, $querySid, $context)", "@(2, 1, 4)",
+                         "$currentUserSid = $identity.User.Value", "InstallProperty('State')",
+                         "InstallProperty('VersionString')", "$registration.userSid -eq $currentUserSid",
+                         "$registration.state -eq '5'", "$registration.version -eq $Build.packageVersion",
+                         "Assert-ProductRegistration $v1 $false", "Assert-ProductRegistration $v3 $false",
+                         "Assert-ProductRegistration $v2 $false", "registrationChecks = $registrationChecks",
+                         "ALLUSERS=1", "MSIINSTALLPERUSER=1"):
+            self.assertIn(required, self.tests)
+        self.assertNotIn("InstallProperty('ProductState')", self.tests)
+
     def test_fixture_isolation_and_coverage(self):
         uuid.UUID(self.config["upgradeCode"])
         self.assertTrue(self.config["installFolder"].endswith("-Preview"))

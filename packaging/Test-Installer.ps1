@@ -21,9 +21,11 @@ $logs = Join-Path $OutputDirectory "logs-$fixtureId"
 [IO.Directory]::CreateDirectory($logs) | Out-Null
 $results = [Collections.Generic.List[object]]::new()
 $packages = [Collections.Generic.List[object]]::new()
+$registrationChecks = [Collections.Generic.List[object]]::new()
 $runningFixture = $null
 $success = $false
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$currentUserSid = $identity.User.Value
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 $isAdministrator = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $identity.Dispose()
@@ -101,6 +103,65 @@ function Assert-PackagePolicy($Build) {
     Assert-True ([string]($summary.Property(7)) -like 'x64;*') 'Package is not x64.'
     Record-Pass "MSI table policy $($Build.packageVersion)"
 }
+function Get-MsiProductRegistrations([string]$ProductCode) {
+    # Query MSI's supported context-aware API, not a registry layout assumption.
+    # https://learn.microsoft.com/en-us/windows/win32/msi/installer-productsex
+    # https://learn.microsoft.com/en-us/windows/win32/msi/product-installproperty
+    # Context 2=current-user unmanaged, 1=current-user managed, 4=machine.
+    $installer = New-Object -ComObject WindowsInstaller.Installer
+    try {
+        foreach ($context in @(2, 1, 4)) {
+            # MSI requires no SID for machine enumeration. The current user's
+            # explicit SID restricts user queries without enumerating other users.
+            $querySid = if ($context -eq 4) { $null } else { $currentUserSid }
+            $products = $null
+            $count = 0
+            try {
+                $products = $installer.ProductsEx($ProductCode, $querySid, $context)
+                foreach ($product in $products) {
+                    try {
+                        $count++
+                        # SDK Msi.h: INSTALLPROPERTY_PRODUCTSTATE is the literal State.
+                        $state = [string]$product.InstallProperty('State')
+                        $version = if ($state -eq '5') { [string]$product.InstallProperty('VersionString') } else { '<not installed>' }
+                        $entry = [pscustomobject]@{
+                            productCode = [string]$product.ProductCode
+                            context = [int]$product.Context
+                            userSid = [string]$product.UserSid
+                            state = $state
+                            version = $version
+                        }
+                        Write-Host "MSI registration $ProductCode context=$($entry.context) currentUser=$($entry.userSid -eq $currentUserSid) state=$state version=$version"
+                        $entry
+                    } finally { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($product) }
+                }
+                if ($count -eq 0) { Write-Host "MSI registration $ProductCode context=$context absent" }
+            } catch {
+                Write-Host "MSI registration query failed: product=$ProductCode context=$context error=$($_.Exception.Message)"
+                throw
+            } finally {
+                if ($null -ne $products) { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($products) }
+            }
+        }
+    } finally { $null = [Runtime.InteropServices.Marshal]::ReleaseComObject($installer) }
+}
+function Assert-ProductRegistration($Build, [bool]$Installed, [string]$Scenario) {
+    $registrations = @(Get-MsiProductRegistrations $Build.productCode)
+    $registrationChecks.Add([pscustomobject]@{
+        scenario = $Scenario; productCode = $Build.productCode; expectedInstalled = $Installed
+        registrations = $registrations
+    })
+    Assert-True (@($registrations | Where-Object { $_.context -ne 2 }).Count -eq 0) "$Scenario`: unexpected machine or managed-user registration."
+    if ($Installed) {
+        Assert-True ($registrations.Count -eq 1) "$Scenario`: expected exactly one current-user unmanaged registration."
+        $registration = $registrations[0]
+        Assert-True ($registration.productCode -eq $Build.productCode -and $registration.userSid -eq $currentUserSid) "$Scenario`: MSI product identity or user SID differs."
+        Assert-True ($registration.state -eq '5') "$Scenario`: MSI product is not installed."
+        Assert-True ($registration.version -eq $Build.packageVersion) "$Scenario`: MSI registered version differs."
+    } else {
+        Assert-True ($registrations.Count -eq 0) "$Scenario`: MSI product registration remains."
+    }
+}
 function Assert-Installed($Build) {
     $marker = Get-Content (Join-Path $installPath 'installed-by-msi.json') -Raw | ConvertFrom-Json
     Assert-True ($marker.packageVersion -eq $Build.packageVersion) 'Installed marker version differs.'
@@ -111,8 +172,7 @@ function Assert-Installed($Build) {
     $shell = New-Object -ComObject WScript.Shell
     $link = $shell.CreateShortcut($startLink)
     Assert-True ($link.TargetPath -eq (Join-Path $installPath "$($config.app).exe")) 'Start menu target is wrong.'
-    $reg = Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$($Build.productCode)" -ErrorAction Stop
-    Assert-True ($reg.DisplayVersion -eq $Build.packageVersion) 'Per-user Apps/Programs registration is missing or wrong.'
+    Assert-ProductRegistration $Build $true 'Installed product'
 }
 function Assert-Sentinel {
     Assert-True ((Get-Content $sentinel -Raw) -eq $sentinelContent) 'Unowned user data was changed or deleted.'
@@ -144,6 +204,15 @@ try {
     $sentinel = Join-Path $dataPath 'user-data-sentinel.txt'
     $sentinelContent = "Must survive repair, upgrade, rollback and uninstall: $fixtureId"
     [IO.File]::WriteAllText($sentinel, $sentinelContent)
+
+    foreach ($override in @('ALLUSERS=1', 'MSIINSTALLPERUSER=1')) {
+        $name = 'reject-' + $override.Split('=')[0].ToLowerInvariant()
+        $null = Invoke-Msi $name @('/i', ('"' + $v1.msiPath + '"'), $override) @(1603)
+        Assert-True (-not (Test-Path $installPath)) "$override rejection created an installation directory."
+        Assert-ProductRegistration $v1 $false "$override rejection"
+        Assert-Sentinel
+        Record-Pass "$override is rejected before installation"
+    }
 
     # The guard fixture is a tiny managed executable that exits by itself. It does not
     # launch the real app, open a profile, or need a forced stop even on test failure.
@@ -207,7 +276,7 @@ try {
 
     $null = Invoke-Msi 'upgrade-v2' @('/i', ('"' + $v2.msiPath + '"'))
     Assert-Installed $v2
-    Assert-True (-not (Test-Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$($v1.productCode)")) 'Old product registration remained after major upgrade.'
+    Assert-ProductRegistration $v1 $false 'Old product after major upgrade'
     Assert-True ((Test-Path $desktopLink) -and (Test-Path $startupLink)) 'Upgrade did not preserve the opted-in features.'
     Assert-Sentinel
     Record-Pass 'Major upgrade and opted-in feature migration'
@@ -220,7 +289,7 @@ try {
     $null = Invoke-Msi 'rollback-failed-upgrade' @('/i', ('"' + $v3.msiPath + '"'), 'WIXFAILWHENDEFERRED=1') @(1603)
     Assert-Installed $v2
     Assert-True ((Get-FileHash $payloadFile -Algorithm SHA256).Hash -eq $expectedHash) 'Rollback did not restore the original payload.'
-    Assert-True (-not (Test-Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$($v3.productCode)")) 'Failed-upgrade product is registered.'
+    Assert-ProductRegistration $v3 $false 'Failed-upgrade product'
     Assert-True ((Test-Path $desktopLink) -and (Test-Path $startupLink)) 'Rollback lost the previous shortcuts.'
     Assert-Sentinel
     Assert-True ((Get-Content $unownedFile -Raw) -eq $sentinelContent) 'Rollback changed unowned data in the install folder.'
@@ -229,7 +298,7 @@ try {
     $null = Invoke-Msi 'uninstall-v2' @('/x', $v2.productCode)
     Assert-True (-not (Test-Path (Join-Path $installPath "$($config.app).exe"))) 'Uninstall left the application behind.'
     Assert-True (-not (Test-Path $startLink) -and -not (Test-Path $desktopLink) -and -not (Test-Path $startupLink)) 'Uninstall left managed shortcuts behind.'
-    Assert-True (-not (Test-Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$($v2.productCode)")) 'Uninstall left its product registration.'
+    Assert-ProductRegistration $v2 $false 'Uninstalled product'
     Assert-Sentinel
     Assert-True ((Get-Content $unownedFile -Raw) -eq $sentinelContent) 'Uninstall removed unowned content.'
     Record-Pass 'Uninstall preserves external and unowned in-folder data'
@@ -245,10 +314,11 @@ try {
         catch { Write-Warning $_.Exception.Message }
     }
     [ordered]@{ success = $success; fixtureId = $fixtureId; logs = $logs; checks = $results; testedAtUtc = [DateTime]::UtcNow.ToString('o')
+        registrationChecks = $registrationChecks
         testUserIsAdministrator = $isAdministrator
         standardUserInstallEstablished = ($success -and -not $isAdministrator)
         privilegeLimitation = $(if ($isAdministrator) { 'Executed with an administrator token. Limited MSI metadata was checked, but actual standard-user installation is not established.' } else { 'Executed without an administrator token; interactive UI acceptance remains separate.' }) } |
-        ConvertTo-Json -Depth 5 | Set-Content (Join-Path $OutputDirectory "test-results-$fixtureId.json")
+        ConvertTo-Json -Depth 7 | Set-Content (Join-Path $OutputDirectory "test-results-$fixtureId.json")
     # Preserve all logs and data sentinels for inspection. The disposable VM/runner
     # owns their eventual removal; never recursively delete AppData in a test.
 }

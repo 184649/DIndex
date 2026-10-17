@@ -101,9 +101,9 @@ python ./packaging/verify_source.py
 
 Tests build synthetic versions `1.1.0`, `1.1.1`, `1.1.2` with one random fixture UpgradeCode and verify:
 
-1. Per-user/limited-privilege/x64 MSI metadata, optional-feature defaults and transaction sequencing
+1. Per-user/limited-privilege/x64 MSI metadata, optional-feature defaults and transaction sequencing; actual `ALLUSERS=1` and `MSIINSTALLPERUSER=1` rejection before creating files or registration
 2. Running-process rejection before install, repair, upgrade and uninstall, without terminating the process
-3. Clean install, complete bundled runtime, Start menu target and per-user Apps registration
+3. Clean install, complete bundled runtime, Start menu target and Windows Installer current-user unmanaged registration with the expected installed version
 4. No desktop/startup shortcut without opt-in; explicit opt-in and feature retention on upgrade
 5. Same-version repair after deleting a fixture DLL
 6. Major upgrade and removal of old product registration
@@ -113,6 +113,8 @@ Tests build synthetic versions `1.1.0`, `1.1.1`, `1.1.2` with one random fixture
 
 Only fixture builds include WiX’s `WixFailWhenDeferred` failure-injection action; it is excluded from ordinary MSI builds. Process checks use a tiny self-contained helper with the same EXE basename, which exits on its own after 45 seconds. There is no process kill. These tests do not prove that every real-app exit/save path works; that belongs in interactive acceptance.
 
+Product registration is queried through Windows Installer's supported `ProductsEx` API rather than assuming a particular uninstall registry path. Each installed fixture must have exactly one current-user unmanaged registration (context `2`), matching the current SID, `State=5` and `VersionString`; managed-user (`1`) and machine (`4`) registrations must be absent. The same API checks old/failed/uninstalled product absence. Query errors fail the test rather than being treated as absence. Context, state and version observations are logged and retained in the test-results manifest. These API checks do not replace the interactive Apps UI check below.
+
 Each MSI operation has a verbose log. `test-results-<GUID>.json` records passed checks or the first failure, plus whether the executing Windows token is an administrator. An administrator-run test explicitly records that real standard-user installation has not been established. Unexpected MSI exit codes print at most 80 relevant failure-log lines to CI, while preserving the complete local log. Fixture products are uninstalled in `finally`; any cleanup failure is reported. Test output and data sentinels are left for inspection and eventual disposable-environment removal. No upload, Release, signing, CI dispatch or user-computer installation is performed by either script.
 
 ## Interactive acceptance before distribution
@@ -120,6 +122,11 @@ Each MSI operation has a verbose log. `test-results-<GUID>.json` records passed 
 Use a clean, supported Windows x64 VM with a standard user account and no separately installed .NET runtime. Check the wizard and maintenance UI, Windows Apps registration, first launch, loading/saving the isolated Preview profile, explicit app exit, optional shortcuts and startup behavior. Repeat the MSI upgrade/rollback/data-retention cases. Verify the shipping MSI has no fixture failure action and that its included runtime version matches the reviewed security-serviced version. Code-signing, publisher reputation and a reliable distribution channel remain separate release prerequisites.
 
 ## Design references
+
+- [Windows Installer ProductsEx enumeration](https://learn.microsoft.com/en-us/windows/win32/msi/installer-productsex)
+- [Product installation context](https://learn.microsoft.com/en-us/windows/win32/msi/product-context)
+- [Context-aware installation properties](https://learn.microsoft.com/en-us/windows/win32/msi/product-installproperty)
+- [Official SDK property literals, including State and VersionString](https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/RecompiledIdlHeaders/um/Msi.h)
 
 - [WiX 3 major-upgrade transaction scheduling](https://docs.firegiant.com/wix3/xsd/wix/majorupgrade/)
 - [WiX detect-only CloseApplication options](https://docs.firegiant.com/wix3/xsd/util/closeapplication/)
