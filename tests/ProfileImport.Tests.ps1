@@ -24,6 +24,23 @@ function Assert-Throws([scriptblock]$Action, [string]$Pattern = '.') {
     catch { $caught = $_.Exception.Message }
     if (-not $caught -or $caught -notmatch $Pattern) { throw "Expected failure matching '$Pattern'; actual: $caught" }
 }
+function Remove-FixtureReparsePoints([string]$Path) {
+    # Inspect only direct children. Never enumerate through a junction/symlink.
+    # Remove links before their targets, including links left by a failed case.
+    $attributes = [IO.File]::GetAttributes($Path)
+    if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        if (($attributes -band [IO.FileAttributes]::Directory) -ne 0) {
+            [IO.Directory]::Delete($Path, $false)
+        }
+        else { [IO.File]::Delete($Path) }
+        return
+    }
+    if (($attributes -band [IO.FileAttributes]::Directory) -ne 0) {
+        foreach ($child in @([IO.Directory]::EnumerateFileSystemEntries($Path))) {
+            Remove-FixtureReparsePoints $child
+        }
+    }
+}
 function Write-FixtureJson([string]$Path, $Value) {
     [IO.File]::WriteAllText($Path, (ConvertTo-Json -InputObject $Value -Depth 32), [Text.UTF8Encoding]::new($false))
 }
@@ -123,10 +140,11 @@ try {
         $link = Join-Path $f.Source 'linked'
         New-Item -ItemType Junction -Path $link -Target $outside | Out-Null
         Assert-Throws { Import-Fixture $f } 'Reparse'
-        [IO.Directory]::Delete($link)
+        [IO.Directory]::Delete($link, $false)
         $parentLink = Join-Path $f.Root 'linked-parent'
         New-Item -ItemType Junction -Path $parentLink -Target $outside | Out-Null
         Assert-Throws { Invoke-LegacyProfileImport -Source $f.Source -Destination (Join-Path $parentLink 'preview') -BackupDirectory $f.Backup } 'Reparse'
+        [IO.Directory]::Delete($parentLink, $false)
         Assert-True ([IO.File]::ReadAllText((Join-Path $outside 'keep.txt')) -eq 'outside data') 'Junction target changed.'
     }
     Invoke-Case 'alternate streams are rejected without discarding evidence' {
@@ -256,7 +274,21 @@ try {
 }
 finally {
     # Only the synthetic temp tree is deleted. Production helper never deletes.
-    if ([IO.Directory]::Exists($script:FixtureRoot)) { [IO.Directory]::Delete($script:FixtureRoot, $true) }
+    # First unlink every reparse point without following it; recursive .NET
+    # deletion can otherwise encounter a junction whose target was just removed.
+    try {
+        if ([IO.Directory]::Exists($script:FixtureRoot)) {
+            Remove-FixtureReparsePoints $script:FixtureRoot
+            [IO.Directory]::Delete($script:FixtureRoot, $true)
+        }
+    }
+    catch {
+        # Do not let a cleanup exception replace the original case failures (or
+        # an unexpected exception already unwinding through this finally block).
+        $cleanupFailure = "Fixture cleanup failed: $($_.Exception.Message). Temporary tree retained at $script:FixtureRoot"
+        $script:Failed.Add($cleanupFailure)
+        Write-Host "WARN $cleanupFailure"
+    }
 }
 if ($script:Failed.Count) { throw ($script:Failed -join "`n") }
 Write-Host "All $script:Passed $script:ProfileImportApp synthetic profile-import tests passed."
