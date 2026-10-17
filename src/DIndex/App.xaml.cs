@@ -10,11 +10,14 @@ public partial class App : System.Windows.Application
     private MainWindow? _mainWindow;
     private Mutex? _instanceMutex;
     private bool _ownsMutex;
+    private FileStream? _profileLock;
 
     protected override void OnStartup(System.Windows.StartupEventArgs e)
     {
         DispatcherUnhandledException += OnDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
+        try
+        {
         base.OnStartup(e);
 
         ShutdownMode = System.Windows.ShutdownMode.OnExplicitShutdown;
@@ -29,14 +32,29 @@ public partial class App : System.Windows.Application
             return;
         }
         Directory.CreateDirectory(AppPaths.AppDataDirectory);
+        // A file lock also covers path aliases and multiple Windows sessions.
+        _profileLock = new FileStream(Path.Combine(AppPaths.AppDataDirectory, ".instance.lock"),
+            FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose);
 
         _mainWindow = new MainWindow();
         MainWindow = _mainWindow;
         _mainWindow.Hide();
+        }
+        catch (Exception ex)
+        {
+            ErrorLogger.Write(ex);
+            try
+            {
+                System.Windows.MessageBox.Show($"DIndexを起動できませんでした。保存先・権限・同じデータを使う別プロセスを確認してください。\n{ex.GetBaseException().Message}",
+                    "DIndex 起動エラー", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
+            }
+            finally { Shutdown(1); }
+        }
     }
 
     protected override void OnExit(System.Windows.ExitEventArgs e)
     {
+        _profileLock?.Dispose();
         if (_ownsMutex) _instanceMutex?.ReleaseMutex();
         _instanceMutex?.Dispose();
         base.OnExit(e);

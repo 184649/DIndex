@@ -24,12 +24,14 @@ public sealed class FileIndexService : IDisposable
     private IndexSession? _building;
     private IndexConfiguration? _snapshotConfiguration;
     private long _nextVersion;
+    private long _requestVersion;
     private bool _disposed;
     private int _cachedOnly;
     private DateTime _nextRecoveryUtc;
     private int _recoveryDelaySeconds = 5;
 
     public int Count => Volatile.Read(ref _snapshot).Records.Length;
+    public long RequestVersion => Volatile.Read(ref _requestVersion);
     public long SnapshotVersion => Volatile.Read(ref _snapshot).Version;
     public bool IsDirty => Volatile.Read(ref _cachedOnly) != 0 || Volatile.Read(ref _active)?.IsDirty == true;
     public bool IsRebuilding => Volatile.Read(ref _building) is not null;
@@ -58,6 +60,7 @@ public sealed class FileIndexService : IDisposable
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            ++_requestVersion;
             previous = _active;
             building = _building;
             _active = null;
@@ -70,6 +73,57 @@ public sealed class FileIndexService : IDisposable
         building?.Dispose();
         previous?.Dispose();
         NotifyPublished(snapshot);
+    }
+
+    /// <summary>
+    /// Prepare cached records off-thread. Capture RequestVersion BEFORE loading the cache;
+    /// a newer rebuild/restore makes this operation return false without replacing its results.
+    /// </summary>
+    public Task<bool> ReplaceAllAsync(IEnumerable<SearchRecord> records, AppSettings settings,
+        long expectedRequestVersion, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(records);
+        ArgumentNullException.ThrowIfNull(settings);
+        cancellationToken.ThrowIfCancellationRequested();
+        var configuration = IndexConfiguration.Create(settings);
+        long requestVersion;
+        IndexSession? building;
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_requestVersion != expectedRequestVersion) return Task.FromResult(false);
+            requestVersion = ++_requestVersion;
+            building = _building;
+            _building = null;
+        }
+        building?.Dispose();
+        return Task.Run(() =>
+        {
+            var items = new Dictionary<string, SearchRecord>(StringComparer.OrdinalIgnoreCase);
+            foreach (var record in records)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (RequestVersion != requestVersion) return false;
+                if (configuration.AllowsRecord(record)) items[record.FullPath] = record;
+            }
+            var recordsArray = items.Values.ToArray();
+            PublishedSnapshot snapshot;
+            IndexSession? previous;
+            lock (_gate)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (_disposed || _requestVersion != requestVersion) return false;
+                previous = _active;
+                _active = null;
+                _snapshotConfiguration = configuration;
+                Volatile.Write(ref _cachedOnly, 1);
+                snapshot = new PublishedSnapshot(recordsArray, ++_nextVersion);
+                Volatile.Write(ref _snapshot, snapshot);
+            }
+            previous?.Dispose();
+            NotifyPublished(snapshot);
+            return true;
+        });
     }
 
     // Returning the same read-only wrapper avoids a million-reference copy on every save/read.
@@ -88,7 +142,8 @@ public sealed class FileIndexService : IDisposable
         IndexSession session;
         IndexSession? previousBuild;
         IndexSession? obsoleteActive = null;
-        PublishedSnapshot? filteredSnapshot = null;
+        PublishedSnapshot? safeSnapshot = null;
+        SearchRecord[]? previousRecords = null;
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
@@ -97,35 +152,57 @@ public sealed class FileIndexService : IDisposable
             previousBuild = _building;
             if (_snapshotConfiguration is null || !_snapshotConfiguration.SameScope(configuration))
             {
-                // Removed roots/exclusions must disappear even if this rebuild is later canceled.
-                // Stop the old writer before publishing the narrowed, still-usable cached subset.
+                // Scope changes must hide removed paths immediately without filtering millions
+                // of entries on the UI thread. Restore only the allowed subset off-thread below.
+                previousRecords = _snapshot.Records;
                 obsoleteActive = _active;
                 _active = null;
                 _snapshotConfiguration = configuration;
                 Volatile.Write(ref _cachedOnly, 1);
-                if (_snapshot.Records.Length > 0)
+                if (previousRecords.Length > 0)
                 {
-                    filteredSnapshot = new PublishedSnapshot(_snapshot.Records.Where(configuration.AllowsRecord).ToArray(), ++_nextVersion);
-                    Volatile.Write(ref _snapshot, filteredSnapshot);
+                    safeSnapshot = new PublishedSnapshot(Array.Empty<SearchRecord>(), ++_nextVersion);
+                    Volatile.Write(ref _snapshot, safeSnapshot);
                 }
             }
+            ++_requestVersion;
             session = new IndexSession(configuration, CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token), cancellationToken);
             _building = session;
         }
         previousBuild?.Dispose();
         obsoleteActive?.Dispose();
-        if (filteredSnapshot is not null) NotifyPublished(filteredSnapshot);
+        if (safeSnapshot is not null) NotifyPublished(safeSnapshot);
         // Watcher setup and network filesystem calls must never run on the UI thread.
-        return Task.Run(() => BuildAndPublishAsync(session, progress));
+        return Task.Run(() => BuildAndPublishAsync(session, progress, previousRecords));
     }
 
-    private async Task BuildAndPublishAsync(IndexSession session, Action<int, string>? progress)
+    private async Task BuildAndPublishAsync(IndexSession session, Action<int, string>? progress, SearchRecord[]? previousRecords)
     {
         var token = session.Token;
         var committed = false;
         var entered = false;
         try
         {
+            if (previousRecords is { Length: > 0 })
+            {
+                var allowed = previousRecords.Where(record =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    return session.Configuration.AllowsRecord(record);
+                }).ToArray();
+                previousRecords = null;
+                PublishedSnapshot? retained = null;
+                lock (_gate)
+                {
+                    token.ThrowIfCancellationRequested();
+                    if (!_disposed && ReferenceEquals(_building, session) && _active is null)
+                    {
+                        retained = new PublishedSnapshot(allowed, ++_nextVersion);
+                        Volatile.Write(ref _snapshot, retained);
+                    }
+                }
+                if (retained is not null) NotifyPublished(retained);
+            }
             // Latest request wins, but only one generation allocates/scans at a time. A canceled
             // synchronous network read may take time to return; do not start unbounded replacements.
             await _buildGate.WaitAsync(token).ConfigureAwait(false);
@@ -344,11 +421,13 @@ public sealed class FileIndexService : IDisposable
         {
             session.Token.ThrowIfCancellationRequested();
             if (!session.Configuration.IsInScope(root, true)) continue;
+            FileSystemWatcher? watcher = null;
+            var configured = false;
             try
             {
                 var attributes = File.GetAttributes(root);
                 if ((attributes & FileAttributes.ReparsePoint) != 0 || HasReparseAncestor(root)) continue;
-                var watcher = new FileSystemWatcher(root)
+                watcher = new FileSystemWatcher(root)
                 {
                     IncludeSubdirectories = true, InternalBufferSize = 64 * 1024,
                     NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size
@@ -364,11 +443,13 @@ public sealed class FileIndexService : IDisposable
                 };
                 session.AddWatcher(watcher, root);
                 watcher.EnableRaisingEvents = true;
+                configured = true;
             }
             catch (Exception ex) when (IsReadFailure(ex) || ex is ArgumentException || ex is InvalidOperationException)
             {
                 session.NoteFailure(root);
             }
+            finally { if (!configured) watcher?.Dispose(); }
         }
     }
 
@@ -497,12 +578,13 @@ public sealed class FileIndexService : IDisposable
     private void PreserveUnreadableRecords(IndexSession session)
     {
         if (!session.HasFailures) return;
+        var failedPaths = session.FailedPathsSnapshot();
         foreach (var record in Volatile.Read(ref _snapshot).Records)
         {
             session.Token.ThrowIfCancellationRequested();
             if (session.Configuration.IsInScope(record.FullPath, record.IsDirectory)
                 && (!record.IsDirectory || session.Configuration.IncludeDirectories)
-                && session.CouldNotRead(record.FullPath))
+                && IsUnderAnyPath(record.FullPath, failedPaths))
             {
                 session.Items.TryAdd(record.FullPath, record);
                 for (var directory = record.IsDirectory ? record.FullPath : record.Folder;
@@ -510,6 +592,12 @@ public sealed class FileIndexService : IDisposable
                     directory = Path.GetDirectoryName(directory)) session.Directories.TryAdd(directory, 0);
             }
         }
+    }
+
+    private static bool IsUnderAnyPath(string path, string[] parents)
+    {
+        foreach (var parent in parents) if (IsPathOrDescendant(path, parent)) return true;
+        return false;
     }
 
     private static void TryStoreRecord(IndexSession session, ConcurrentDictionary<string, SearchRecord> target, string path, bool directory)
@@ -640,6 +728,7 @@ public sealed class FileIndexService : IDisposable
         {
             if (_disposed) return;
             _disposed = true;
+            ++_requestVersion;
             active = _active;
             building = _building;
             _active = null;
@@ -678,7 +767,7 @@ public sealed class FileIndexService : IDisposable
         public bool AllowsRecord(SearchRecord record) => (!record.IsDirectory || IncludeDirectories) && IsInScope(record.FullPath, record.IsDirectory);
         public bool IsInScope(string path, bool directory)
         {
-            if (!Roots.Any(root => IsPathOrDescendant(path, root))) return false;
+            if (!IsUnderAnyPath(path, Roots)) return false;
             var ancestor = directory ? path : Path.GetDirectoryName(path);
             while (!string.IsNullOrEmpty(ancestor))
             {
@@ -730,7 +819,7 @@ public sealed class FileIndexService : IDisposable
             Interlocked.Increment(ref _failureVersion);
             MarkNeedsRecovery();
         }
-        public bool CouldNotRead(string path) => _failedPaths.Keys.Any(failed => IsPathOrDescendant(path, failed));
+        public string[] FailedPathsSnapshot() => _failedPaths.Select(x => x.Key).ToArray();
         public void MarkNeedsRecovery() => Interlocked.Exchange(ref _needsRecovery, 1);
         public void Enqueue(string path, bool subtree)
         {

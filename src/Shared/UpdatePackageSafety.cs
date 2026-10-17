@@ -199,6 +199,33 @@ internal static class UpdatePackageSafety
         if (reader.ReadUInt16() is not (0x10b or 0x20b)) throw new InvalidDataException("更新ファイルの PE 形式が不正です。");
     }
 
+    internal static void WriteSignal(string path)
+    {
+        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            using (var signal = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                signal.WriteByte(1);
+                signal.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, path);
+        }
+        finally { TryDelete(temporary); }
+    }
+
+    internal static bool HasValidSignal(string path)
+    {
+        try
+        {
+            using var signal = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (signal.Length == 1 && signal.ReadByte() == 1) return true;
+            throw new InvalidDataException("The update handshake signal is invalid.");
+        }
+        catch (FileNotFoundException) { return false; }
+        catch (DirectoryNotFoundException) { return false; }
+    }
+
     internal static void TryDelete(string path)
     {
         try { File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { }

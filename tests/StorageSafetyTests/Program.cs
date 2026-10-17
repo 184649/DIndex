@@ -20,6 +20,7 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
+        if (args.Length == 1 && args[0] == "--exit-immediately") return 0;
         Directory.CreateDirectory(Root);
         // No production profile is used, even by tests which exercise default constructors.
         Environment.SetEnvironmentVariable("DINDEX_DATA_DIR", Path.Combine(Root, "profile"));
@@ -270,6 +271,54 @@ internal static class Program
             File.WriteAllText(path, "corrupt but recoverable by user"); _ = repository.Load();
             True(Directory.GetFiles(directory, "*.corrupt-*").Any(p => File.ReadAllText(p) == "corrupt but recoverable by user"), "Recovery discarded corrupt original.");
         }));
+        await Test("Settings external edits after load are preserved", async () =>
+        {
+            var path = Path.Combine(Fixture("settings-external"), "settings.json");
+            new SettingsRepository(path).Save(new AppSettings { ResultLimit = 100 });
+            var repository = new SettingsRepository(path); var loaded = repository.Load();
+            var external = "{\"ResultLimit\":321,\"SearchRoots\":[]}"; File.WriteAllText(path, external);
+            loaded.ResultLimit = 200;
+            await Throws<InvalidOperationException>(() => Run(() => repository.Save(loaded)));
+            Equal(external, File.ReadAllText(path));
+            Equal(321, repository.Load().ResultLimit);
+            repository.Save(new AppSettings { ResultLimit = 322 }); Equal(322, repository.Load().ResultLimit);
+        });
+        await Test("Settings external edits after save are preserved", async () =>
+        {
+            var path = Path.Combine(Fixture("settings-external-save"), "settings.json"); var repository = new SettingsRepository(path);
+            repository.Save(new AppSettings()); File.WriteAllText(path, "externally edited, temporarily invalid");
+            await Throws<InvalidOperationException>(() => Run(() => repository.Save(new AppSettings())));
+            Equal("externally edited, temporarily invalid", File.ReadAllText(path));
+        });
+        await Test("Settings external deletion is not silently recreated", async () =>
+        {
+            var path = Path.Combine(Fixture("settings-deleted"), "settings.json"); var repository = new SettingsRepository(path);
+            repository.Save(new AppSettings()); File.Delete(path);
+            await Throws<InvalidOperationException>(() => Run(() => repository.Save(new AppSettings())));
+            True(!File.Exists(path), "External deletion was undone.");
+        });
+        await Test("Settings newly created external file is not overwritten", async () =>
+        {
+            var path = Path.Combine(Fixture("settings-external-create"), "settings.json"); var repository = new SettingsRepository(path);
+            _ = repository.Load(); File.WriteAllText(path, "{\"ResultLimit\":333}");
+            await Throws<InvalidOperationException>(() => Run(() => repository.Save(new AppSettings())));
+            Equal("{\"ResultLimit\":333}", File.ReadAllText(path));
+        });
+        await Test("Settings two loaded repositories detect competing saves", async () =>
+        {
+            var path = Path.Combine(Fixture("settings-competing"), "settings.json"); new SettingsRepository(path).Save(new AppSettings());
+            var first = new SettingsRepository(path); var second = new SettingsRepository(path); var a = first.Load(); var b = second.Load();
+            a.ResultLimit = 101; first.Save(a); b.ResultLimit = 202;
+            await Throws<InvalidOperationException>(() => Run(() => second.Save(b)));
+            Equal(101, new SettingsRepository(path).Load().ResultLimit);
+        });
+        await Test("Settings BOM decoding and fingerprint refer to identical bytes", () => Run(() =>
+        {
+            var path = Path.Combine(Fixture("settings-bom"), "settings.json");
+            File.WriteAllText(path, "{\"ResultLimit\":321,\"SearchRoots\":[]}", new UTF8Encoding(true));
+            var repository = new SettingsRepository(path); var settings = repository.Load(); Equal(321, settings.ResultLimit);
+            settings.ResultLimit = 322; repository.Save(settings); Equal(322, repository.Load().ResultLimit);
+        }));
         await Test("Settings concurrent saves are complete JSON", async () =>
         {
             var path = Path.Combine(Fixture("settings-concurrent"), "settings.json");
@@ -430,6 +479,53 @@ internal static class Program
             await Throws<ArgumentException>(() => Run(() => Updater.ParseArgs(new[] { "--unknown" })));
             await Throws<ArgumentException>(() => Run(() => Updater.ParseArgs(new[] { "--appPath" })));
             await Throws<ArgumentException>(() => Run(() => Updater.ParseArgs(new[] { "trailing" })));
+        });
+        await Test("Updater preserves selected profile and quoted argument boundaries", () => Run(() =>
+        {
+            var profile = Path.Combine(Root, "custom profile with spaces");
+            var start = Updater.CreateRestartStartInfo(Path.Combine(Root, "DIndex.exe"), profile);
+            Equal(false, start.UseShellExecute); Equal(profile, start.Environment["DINDEX_DATA_DIR"]); Equal(0, start.ArgumentList.Count);
+            var updaterStart = UpdateService.CreateUpdaterStartInfo(Path.Combine(Root, "DIndexUpdater.exe"), 42, Path.Combine(Root, "DIndex.exe"), Path.Combine(Root, "app.zip"), new string('a', 64), profile, Path.Combine(Root, "ready"), Path.Combine(Root, "proceed"));
+            var parsed = Updater.ParseArgs(updaterStart.ArgumentList.ToArray()); Equal(profile, parsed["dataDirectory"]); Equal("42", parsed["processId"]);
+        }));
+        await Test("Updater handshake needs explicit proceed", async () =>
+        {
+            var directory = Fixture("handshake"); var ready = Path.Combine(directory, "ready"); var proceed = Path.Combine(directory, "proceed");
+            Updater.SignalReady(ready);
+            await UpdateService.WaitUntilReadyAsync(Process.GetCurrentProcess(), ready, TimeSpan.FromSeconds(1), CancellationToken.None);
+            await Throws<TimeoutException>(() => Updater.WaitForProceedAsync(proceed, TimeSpan.FromMilliseconds(20), CancellationToken.None));
+            UpdateService.SignalProceed(proceed);
+            await Updater.WaitForProceedAsync(proceed, TimeSpan.FromSeconds(1), CancellationToken.None);
+        });
+        await Test("Updater canceled handshake never creates proceed signal", async () =>
+        {
+            var directory = Fixture("handshake-cancel"); var ready = Path.Combine(directory, "ready"); var proceed = Path.Combine(directory, "proceed");
+            using var cancellation = new CancellationTokenSource(); cancellation.Cancel();
+            await Throws<OperationCanceledException>(() => UpdateService.WaitUntilReadyAsync(Process.GetCurrentProcess(), ready, TimeSpan.FromSeconds(1), cancellation.Token));
+            await Throws<OperationCanceledException>(() => Updater.WaitForProceedAsync(proceed, TimeSpan.FromSeconds(1), cancellation.Token));
+            True(!File.Exists(proceed), "Canceled handshake committed an update.");
+        });
+        await Test("Updater handshake rejects invalid signal and preserves existing files", async () =>
+        {
+            var signal = Path.Combine(Fixture("handshake-invalid"), "signal"); File.WriteAllText(signal, "existing");
+            await Throws<InvalidDataException>(() => Updater.WaitForProceedAsync(signal, TimeSpan.FromSeconds(1), CancellationToken.None));
+            await Throws<IOException>(() => Run(() => Updater.SignalReady(signal)));
+            await Throws<IOException>(() => Run(() => UpdateService.SignalProceed(signal)));
+            Equal("existing", File.ReadAllText(signal));
+        });
+        await Test("Updater readiness timeout leaves calling process running", async () =>
+        {
+            var ready = Path.Combine(Fixture("ready-timeout"), "ready");
+            await Throws<TimeoutException>(() => UpdateService.WaitUntilReadyAsync(Process.GetCurrentProcess(), ready, TimeSpan.FromMilliseconds(20), CancellationToken.None));
+            True(!Process.GetCurrentProcess().HasExited, "Calling application was terminated.");
+        });
+        await Test("Updater startup failure is detected before application shutdown", async () =>
+        {
+            var start = new ProcessStartInfo { FileName = Environment.ProcessPath!, UseShellExecute = false };
+            if (Path.GetFileNameWithoutExtension(start.FileName).Equals("dotnet", StringComparison.OrdinalIgnoreCase)) start.ArgumentList.Add(System.Reflection.Assembly.GetExecutingAssembly().Location);
+            start.ArgumentList.Add("--exit-immediately");
+            using var exited = Process.Start(start)!; await exited.WaitForExitAsync();
+            await Throws<InvalidOperationException>(() => UpdateService.WaitUntilReadyAsync(exited, Path.Combine(Root, "never-ready"), TimeSpan.FromSeconds(1), CancellationToken.None));
         });
         await Test("Updater wrong process is never killed", async () =>
         {

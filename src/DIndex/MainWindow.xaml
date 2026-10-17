@@ -29,6 +29,7 @@
                 </Border>
                 <StackPanel Grid.Column="1" VerticalAlignment="Center">
                     <TextBlock Text="DIndex" Foreground="{StaticResource TextMainBrush}" FontSize="28" FontWeight="Bold"/>
+                    <TextBlock Name="StartupWarningText" Visibility="Collapsed" TextWrapping="Wrap" MaxWidth="600" Foreground="#FFD27D" Margin="0,4,0,0"/>
                     <TextBlock Name="VersionText" Text="タスクトレイ常駐・リアルタイム索引・自動アップデート対応" Foreground="{StaticResource TextSubBrush}" FontSize="13" Margin="0,4,0,0"/>
                 </StackPanel>
                 <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">

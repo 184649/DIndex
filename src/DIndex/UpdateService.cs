@@ -9,7 +9,7 @@ namespace DIndex;
 
 public sealed class UpdateService
 {
-    private const string VersionUrl = "https://raw.githubusercontent.com/Chairman-bits/DIndex/main/version.json";
+    private const string VersionUrl = "https://raw.githubusercontent.com/184649/DIndex/main/version.json";
     private static readonly HttpClient Http = new(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
     private readonly SemaphoreSlim _updateGate = new(1, 1);
@@ -64,6 +64,8 @@ public sealed class UpdateService
         {
             if (_updateStarted) return false;
             if (IsPreviewBuild) throw new InvalidOperationException("開発版は自動更新の対象外です。このブランチから再ビルドして更新してください。");
+            if (!Version.TryParse(NormalizeVersion(info.Version), out var requestedVersion) || requestedVersion <= new Version(CurrentVersion))
+                throw new InvalidDataException("更新先は現在より新しいバージョンである必要があります。");
             UpdatePackageSafety.ValidatePackageUrl(info.DownloadUrl);
             UpdatePackageSafety.ValidatePackageUrl(info.UpdaterUrl);
             UpdatePackageSafety.ValidateHash(info.DownloadSha256);
@@ -88,12 +90,17 @@ public sealed class UpdateService
             var updaterDirectory = Path.Combine(workDirectory, "updater");
             var updaterExe = await UpdatePackageSafety.ExtractExecutableAsync(updaterZip, updaterDirectory, "DIndexUpdater.exe", cancellationToken);
             await UpdatePackageSafety.ExtractExecutableAsync(appZip, Path.Combine(workDirectory, "app-check"), "DIndex.exe", cancellationToken);
+            var readyFile = Path.Combine(workDirectory, "ready");
+            var proceedFile = Path.Combine(workDirectory, "proceed");
             cancellationToken.ThrowIfCancellationRequested();
-            var startInfo = new ProcessStartInfo { FileName = updaterExe, UseShellExecute = false, WorkingDirectory = updaterDirectory };
-            foreach (var argument in new[] { "--processId", Environment.ProcessId.ToString(), "--appPath", appExe, "--appZipPath", appZip,
-                         "--appSha256", info.DownloadSha256, "--restart" }) startInfo.ArgumentList.Add(argument);
+            var startInfo = CreateUpdaterStartInfo(updaterExe, Environment.ProcessId, appExe, appZip, info.DownloadSha256, AppPaths.AppDataDirectory, readyFile, proceedFile);
             using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("更新プログラムを起動できませんでした。");
             launched = true;
+            // Keep the old app open until the updater has verified and staged the replacement.
+            await WaitUntilReadyAsync(process, readyFile, TimeSpan.FromSeconds(60), cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            SignalProceed(proceedFile);
+            // Commit point: cancellation after this signal must not report an aborted update.
             _updateStarted = true;
             return true;
         }
@@ -114,6 +121,29 @@ public sealed class UpdateService
             }
             _updateGate.Release();
         }
+    }
+
+    internal static ProcessStartInfo CreateUpdaterStartInfo(string updaterExe, int processId, string currentExe, string appZip, string hash, string dataDirectory, string readyFile, string proceedFile)
+    {
+        var start = new ProcessStartInfo { FileName = updaterExe, UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(updaterExe)! };
+        foreach (var argument in new[] { "--processId", processId.ToString(), "--appPath", currentExe, "--appZipPath", appZip,
+                     "--appSha256", hash, "--dataDirectory", dataDirectory, "--readyFile", readyFile, "--proceedFile", proceedFile, "--restart" }) start.ArgumentList.Add(argument);
+        return start;
+    }
+
+    internal static void SignalProceed(string path) => UpdatePackageSafety.WriteSignal(path);
+
+    internal static async Task WaitUntilReadyAsync(Process process, string readyFile, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var elapsed = Stopwatch.StartNew();
+        while (elapsed.Elapsed < timeout)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (process.HasExited) throw new InvalidOperationException($"更新プログラムが準備中に終了しました (終了コード {process.ExitCode})。元のアプリは変更されていません。updater.log を確認してください。");
+            if (UpdatePackageSafety.HasValidSignal(readyFile)) return;
+            await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+        }
+        throw new TimeoutException("更新プログラムの準備が時間内に完了しませんでした。元のアプリは終了していません。");
     }
 
     internal static UpdateInfo? DeserializeManifest(byte[] bytes)

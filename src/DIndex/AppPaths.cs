@@ -9,9 +9,13 @@ public static class AppPaths
     private static string ResolveDataDirectory()
     {
         var custom = Environment.GetEnvironmentVariable("DINDEX_DATA_DIR");
-        return string.IsNullOrWhiteSpace(custom)
-            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DIndex")
-            : Path.GetFullPath(custom);
+        var version = System.Reflection.Assembly.GetExecutingAssembly()
+            .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion;
+        var profileName = version?.Contains("-preview", StringComparison.OrdinalIgnoreCase) == true ? "DIndex-Preview" : "DIndex";
+        return Path.TrimEndingDirectorySeparator(string.IsNullOrWhiteSpace(custom)
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), profileName)
+            : Path.GetFullPath(custom));
     }
     public static string SettingsPath => Path.Combine(AppDataDirectory, "settings.json");
     public static string CachePath => Path.Combine(AppDataDirectory, "index-cache.tsv");

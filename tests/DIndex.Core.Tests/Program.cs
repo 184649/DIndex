@@ -6,6 +6,9 @@ using DIndex;
 internal static class Program
 {
     private static int _passed;
+    private static int _skipped;
+    private static int _optionalReparseSkips;
+    private sealed class SkipTestException(string reason) : Exception(reason);
     public static async Task<int> Main()
     {
         var tests = new (string Name, Func<Task> Run)[]
@@ -34,15 +37,19 @@ internal static class Program
             ("directory/file replacement removes stale descendants", ReplacedDirectory),
             ("unreadable subtree preserves prior records and is dirty", UnreadableSubtree),
             ("scope changes stay filtered when rebuild is canceled", ScopeChangeCancellation),
+            ("async cache restore respects expected request version", AsyncCacheExpectedVersion),
+            ("late async cache cannot overwrite a newer rebuild", AsyncCacheSuperseded),
+            ("canceled async cache preserves prior snapshot", AsyncCacheCanceled),
             ("dispose cancels work and rejects new builds", Disposal)
         };
         foreach (var (name, test) in tests)
         {
             var timer = Stopwatch.StartNew();
             try { await test(); Console.WriteLine($"PASS {name} ({timer.ElapsedMilliseconds} ms)"); _passed++; }
+            catch (SkipTestException ex) { Console.WriteLine($"SKIP {name}: {ex.Message}"); _skipped++; }
             catch (Exception ex) { Console.Error.WriteLine($"FAIL {name}: {ex}"); return 1; }
         }
-        Console.WriteLine($"PASS {_passed}/{tests.Length} production-core tests; OS={System.Runtime.InteropServices.RuntimeInformation.OSDescription}");
+        Console.WriteLine($"RESULT: passed={_passed}, skipped={_skipped}, total={tests.Length}, optional reparse fixture skips={_optionalReparseSkips}; OS={System.Runtime.InteropServices.RuntimeInformation.OSDescription}");
         return 0;
     }
 
@@ -364,14 +371,14 @@ internal static class Program
 
     private static async Task UnreadableSubtree()
     {
-        if (OperatingSystem.IsWindows()) { Console.WriteLine("SKIP Unix permission fixture on Windows; Windows ACL test is manual"); return; }
+        if (OperatingSystem.IsWindows()) throw new SkipTestException("Unix permission fixture; Windows ACL test remains manual");
         using var tree = new Tree(); var file = tree.Write("denied/keep.txt"); var directory = Path.GetDirectoryName(file)!;
         using var service = new FileIndexService(); await service.RebuildAsync(tree.Settings(), null, CancellationToken.None);
         var original = File.GetUnixFileMode(directory);
         try
         {
             File.SetUnixFileMode(directory, UnixFileMode.None);
-            try { Directory.GetFiles(directory); Console.WriteLine("SKIP permission fixture: current account bypasses mode restrictions"); return; }
+            try { Directory.GetFiles(directory); throw new SkipTestException("Current account bypasses Unix mode restrictions"); }
             catch (UnauthorizedAccessException) { }
             await service.RebuildAsync(tree.Settings(), null, CancellationToken.None);
             Assert(service.IsDirty && Has(service, file), "Denied enumeration retains prior records and is not marked clean");
@@ -388,11 +395,53 @@ internal static class Program
         using var cts = new CancellationTokenSource();
         var narrowed = retained.Settings(false, "skip");
         var rebuild = service.RebuildAsync(narrowed, (_, _) => cts.Cancel(), cts.Token);
-        Equal(new[] { keep }, service.Snapshot().Select(x => x.FullPath), "Scope narrowed before rebuild returns");
+        Assert(service.Snapshot().All(x => x.FullPath == keep), "Scope change immediately hides removed paths while background filtering prepares the safe subset");
         await Canceled(() => rebuild);
         removed.Write("late.txt"); await Task.Delay(650);
         Equal(new[] { keep }, service.Snapshot().Select(x => x.FullPath), "Canceled build/old watcher cannot resurrect removed scope");
         Assert(service.IsDirty, "Filtered subset awaits verification");
+    }
+
+    private static async Task AsyncCacheExpectedVersion()
+    {
+        using var tree = new Tree(); var file = tree.Write("cached.txt"); using var service = new FileIndexService();
+        var initialVersion = service.RequestVersion;
+        Assert(await service.ReplaceAllAsync(new[] { SearchRecord.FromFile(file) }, tree.Settings(), initialVersion, CancellationToken.None), "Initial async cache restore commits");
+        Assert(service.RequestVersion > initialVersion && Has(service, file), "Async cache commit updates request/snapshot");
+        var current = service.Snapshot();
+        Assert(!await service.ReplaceAllAsync(Array.Empty<SearchRecord>(), tree.Settings(), initialVersion, CancellationToken.None), "Stale pre-load request version rejected");
+        Assert(ReferenceEquals(current, service.Snapshot()), "Stale restore cannot clear current records");
+    }
+
+    private static async Task AsyncCacheSuperseded()
+    {
+        using var stale = new Tree(); using var current = new Tree();
+        var old = stale.Write("stale.txt"); var latest = current.Write("latest.txt");
+        using var service = new FileIndexService(); using var entered = new ManualResetEventSlim(); using var release = new ManualResetEventSlim();
+        IEnumerable<SearchRecord> Delayed()
+        {
+            entered.Set(); release.Wait(TimeSpan.FromSeconds(5)); yield return SearchRecord.FromFile(old);
+        }
+        var loading = service.ReplaceAllAsync(Delayed(), stale.Settings(), service.RequestVersion, CancellationToken.None);
+        Assert(entered.Wait(TimeSpan.FromSeconds(5)), "Cache preparation runs asynchronously");
+        await service.RebuildAsync(current.Settings(), null, CancellationToken.None);
+        release.Set(); Assert(!await loading, "Superseded asynchronous cache restore returns false");
+        Assert(Has(service, latest) && !Has(service, old), "Late startup cache cannot replace new root results");
+    }
+
+    private static async Task AsyncCacheCanceled()
+    {
+        using var tree = new Tree(); var file = tree.Write("old.txt"); using var service = new FileIndexService();
+        service.ReplaceAll(new[] { SearchRecord.FromFile(file) }, tree.Settings()); var prior = service.Snapshot();
+        using var cts = new CancellationTokenSource(); using var entered = new ManualResetEventSlim(); using var release = new ManualResetEventSlim();
+        IEnumerable<SearchRecord> Delayed()
+        {
+            entered.Set(); release.Wait(TimeSpan.FromSeconds(5)); yield return SearchRecord.FromFile(file);
+        }
+        var loading = service.ReplaceAllAsync(Delayed(), tree.Settings(), service.RequestVersion, cts.Token);
+        Assert(entered.Wait(TimeSpan.FromSeconds(5)), "Cache preparation entered");
+        cts.Cancel(); release.Set(); await Canceled(() => loading);
+        Assert(ReferenceEquals(prior, service.Snapshot()), "Canceled preparation cannot partially replace old index");
     }
 
     private static Task Disposal()
@@ -420,7 +469,7 @@ internal static class Program
     {
         try { Directory.CreateSymbolicLink(path, target); return true; }
         catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
-        { Console.WriteLine($"SKIP reparse fixture: {ex.GetType().Name}; requires platform permission"); return false; }
+        { _optionalReparseSkips++; Console.WriteLine($"PARTIAL SKIP reparse fixture: {ex.GetType().Name}; requires platform permission"); return false; }
     }
     private static void Assert(bool condition, string message) { if (!condition) throw new Exception(message); }
     private static void Equal(IEnumerable<string> expected, IEnumerable<string> actual, string message)

@@ -11,6 +11,11 @@ internal static class Program
     {
         string? workDirectory = null;
         string? stagedExecutable = null;
+        string? dataDirectory = null;
+        string? appPathForRecovery = null;
+        var restart = false;
+        var originalExited = false;
+        var installed = false;
         try
         {
             var options = ParseArgs(args);
@@ -20,12 +25,22 @@ internal static class Program
                 (options.ContainsKey("appZip") == options.ContainsKey("appZipPath")))
                 throw new ArgumentException("Usage: DIndexUpdater --processId <id> --appPath <absolute path> (--appZipPath <path> | --appZip <official URL>) --appSha256 <SHA-256> [--restart]");
             UpdatePackageSafety.ValidateHash(appSha256);
+            restart = options.ContainsKey("restart");
+            if (options.TryGetValue("dataDirectory", out dataDirectory))
+            {
+                if (!Path.IsPathFullyQualified(dataDirectory)) throw new ArgumentException("The data directory must be absolute.");
+                dataDirectory = Path.GetFullPath(dataDirectory);
+            }
+            if (options.ContainsKey("readyFile") != options.ContainsKey("proceedFile")) throw new ArgumentException("Both handshake paths must be provided.");
+            if (options.ContainsKey("readyFile") && (!Path.IsPathFullyQualified(options["readyFile"]) || !Path.IsPathFullyQualified(options["proceedFile"])))
+                throw new ArgumentException("Handshake paths must be absolute.");
             var appPath = Path.GetFullPath(rawAppPath);
             if (!Path.GetFileName(appPath).Equals("DIndex.exe", StringComparison.OrdinalIgnoreCase) || !File.Exists(appPath))
                 throw new InvalidDataException("The existing DIndex.exe was not found.");
             if ((File.GetAttributes(appPath) & FileAttributes.ReparsePoint) != 0)
                 throw new InvalidDataException("Updating a linked executable is not supported.");
             var appDirectory = Path.GetDirectoryName(appPath)!;
+            appPathForRecovery = appPath;
             // One updater per installation. Never kill an application or replace files while it is still running.
             using var updateLock = new FileStream(Path.Combine(appDirectory, ".dindex-update.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose);
             workDirectory = Path.Combine(Path.GetTempPath(), "DIndexUpdater", Guid.NewGuid().ToString("N"));
@@ -49,15 +64,22 @@ internal static class Program
                 input.CopyTo(output);
                 output.Flush(flushToDisk: true);
             }
+            if (options.TryGetValue("readyFile", out var readyFile))
+            {
+                SignalReady(readyFile);
+                await WaitForProceedAsync(options["proceedFile"], TimeSpan.FromSeconds(60), CancellationToken.None);
+            }
             Console.WriteLine("Package verified. Waiting for DIndex to close...");
             await WaitForProcessExitAsync(processId, appPath, TimeSpan.FromSeconds(60));
+            originalExited = true;
             InstallVerifiedExecutable(stagedExecutable, appPath);
+            installed = true;
             stagedExecutable = null;
-            if (options.ContainsKey("restart"))
+            if (restart)
             {
                 try
                 {
-                    using var process = StartApplication(appPath);
+                    using var process = StartApplication(appPath, dataDirectory);
                     var exited = process.WaitForExitAsync();
                     if (await Task.WhenAny(exited, Task.Delay(TimeSpan.FromSeconds(2))) == exited)
                         throw new InvalidOperationException($"The updated application exited immediately (code {process.ExitCode}).");
@@ -65,7 +87,7 @@ internal static class Program
                 catch (Exception restartError)
                 {
                     Rollback(appPath);
-                    try { using var restored = StartApplication(appPath); }
+                    try { using var restored = StartApplication(appPath, dataDirectory); }
                     catch (Exception recoveryError) { throw new AggregateException("Update startup failed. The previous executable was restored, but automatic restart also failed.", restartError, recoveryError); }
                     throw new InvalidOperationException("Update startup failed. The previous executable was restored and restarted.", restartError);
                 }
@@ -76,7 +98,12 @@ internal static class Program
         catch (Exception ex)
         {
             Console.Error.WriteLine(ex);
-            WriteErrorLog(ex);
+            if (restart && originalExited && !installed && appPathForRecovery is not null && File.Exists(appPathForRecovery))
+            {
+                try { using var restored = StartApplication(appPathForRecovery, dataDirectory); }
+                catch (Exception restartError) { ex = new AggregateException("Update failed; automatic restart of the previous application also failed.", ex, restartError); }
+            }
+            WriteErrorLog(ex, dataDirectory);
             return 1;
         }
         finally
@@ -147,15 +174,37 @@ internal static class Program
         finally { UpdatePackageSafety.TryDelete(recovery); }
     }
 
-    private static Process StartApplication(string appPath) => Process.Start(new ProcessStartInfo
+    private static Process StartApplication(string appPath, string? dataDirectory) => Process.Start(CreateRestartStartInfo(appPath, dataDirectory))
+        ?? throw new InvalidOperationException("DIndex could not be started.");
+
+    internal static ProcessStartInfo CreateRestartStartInfo(string appPath, string? dataDirectory)
     {
-        FileName = appPath, UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(appPath)!
-    }) ?? throw new InvalidOperationException("DIndex could not be started.");
+        var start = new ProcessStartInfo { FileName = appPath, UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(appPath)! };
+        if (dataDirectory is not null)
+        {
+            start.Environment["DINDEX_DATA_DIR"] = dataDirectory;
+        }
+        return start;
+    }
+
+    internal static void SignalReady(string path) => UpdatePackageSafety.WriteSignal(path);
+
+    internal static async Task WaitForProceedAsync(string path, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var elapsed = Stopwatch.StartNew();
+        while (elapsed.Elapsed < timeout)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (UpdatePackageSafety.HasValidSignal(path)) return;
+            await Task.Delay(100, cancellationToken);
+        }
+        throw new TimeoutException("The application did not authorize the prepared update. The installed executable was not changed.");
+    }
 
     internal static Dictionary<string, string> ParseArgs(string[] args)
     {
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var known = new HashSet<string>(new[] { "processId", "appPath", "appZip", "appZipPath", "appSha256", "restart" }, StringComparer.OrdinalIgnoreCase);
+        var known = new HashSet<string>(new[] { "processId", "appPath", "appZip", "appZipPath", "appSha256", "dataDirectory", "readyFile", "proceedFile", "restart" }, StringComparer.OrdinalIgnoreCase);
         for (var i = 0; i < args.Length; i++)
         {
             if (!args[i].StartsWith("--", StringComparison.Ordinal)) throw new ArgumentException("Unexpected updater argument.");
@@ -190,12 +239,11 @@ internal static class Program
         }
     }
 
-    private static void WriteErrorLog(Exception exception)
+    private static void WriteErrorLog(Exception exception, string? dataDirectory)
     {
         try
         {
-            var dataOverride = Environment.GetEnvironmentVariable("DINDEX_DATA_DIR");
-            var directory = string.IsNullOrWhiteSpace(dataOverride) ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DIndex") : Path.GetFullPath(dataOverride);
+            var directory = dataDirectory ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DIndex");
             Directory.CreateDirectory(directory);
             File.AppendAllText(Path.Combine(directory, "updater.log"), $"[{DateTimeOffset.Now:O}]\n{exception}\n\n");
         }

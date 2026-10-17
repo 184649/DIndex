@@ -58,7 +58,7 @@ public partial class MainWindow : System.Windows.Window
         };
         _statusTimer.Start();
         if (!string.IsNullOrWhiteSpace(_settingsRepository.LastLoadWarning))
-            Interlocked.Exchange(ref _pendingStatus, _settingsRepository.LastLoadWarning);
+            ShowPersistentWarning(_settingsRepository.LastLoadWarning);
 
         VersionText.Text = $"Version {_updateService.CurrentVersion}" + (_updateService.IsPreviewBuild ? " / 開発ブランチ検証版" : " / GitHub更新対応");
 
@@ -109,7 +109,7 @@ public partial class MainWindow : System.Windows.Window
         _trayService?.Dispose();
         _indexCts?.Cancel();
         _searchCts?.Cancel();
-        SaveSettings();
+        // UI changes are saved when made; never overwrite externally edited JSON on exit.
         _indexService.Dispose();
         System.Windows.Application.Current.Shutdown();
     }
@@ -122,12 +122,15 @@ public partial class MainWindow : System.Windows.Window
             IndexProgressBar.IsIndeterminate = true;
             StatusText.Text = "前回索引を読み込み中...";
             var startupRequest = _rebuildRequest;
-            var cache = await _cacheService.LoadAsync(_lifetime.Token);
+            var indexRequestVersion = _indexService.RequestVersion;
+            var cache = await Task.Run(() => _cacheService.LoadAsync(_lifetime.Token), _lifetime.Token);
             if (_allowClose || startupRequest != _rebuildRequest) return;
             if (cache.Count > 0)
             {
-                _indexService.ReplaceAll(cache, _settings);
+                if (!await _indexService.ReplaceAllAsync(cache, _settings, indexRequestVersion, _lifetime.Token)) return;
+                if (_allowClose || startupRequest != _rebuildRequest) return;
                 StatusText.Text = _cacheService.LastLoadWarning ?? $"前回索引を読み込みました: {_indexService.Count:N0} 件（再整合中）";
+                if (_cacheService.LastLoadWarning is not null) ShowPersistentWarning(_cacheService.LastLoadWarning);
                 QueueSearch();
             }
             await RebuildIndexAsync();
@@ -136,12 +139,12 @@ public partial class MainWindow : System.Windows.Window
         catch (Exception ex)
         {
             ErrorLogger.Write(ex);
-            StatusText.Text = $"前回索引を読み込めませんでした: {ex.Message}";
+            ShowPersistentWarning($"前回索引を読み込めませんでした。再作成します: {ex.Message}");
             if (!_allowClose) await RebuildIndexAsync();
         }
         finally
         {
-            IndexProgressBar.IsIndeterminate = false;
+            if (_indexCts is null) IndexProgressBar.IsIndeterminate = false;
         }
     }
 
@@ -173,7 +176,9 @@ public partial class MainWindow : System.Windows.Window
             }, token);
             token.ThrowIfCancellationRequested();
             if (request != _rebuildRequest) return;
-            await _cacheService.SaveAsync(_indexService.Snapshot(), token);
+            await Task.Run(() => _cacheService.SaveAsync(_indexService.Snapshot(), token), token);
+            if (_allowClose || request != _rebuildRequest) return;
+            token.ThrowIfCancellationRequested();
             Interlocked.Exchange(ref _pendingStatus, null);
             StatusText.Text = $"索引完了: {_indexService.Count:N0} 件";
             QueueSearch();
@@ -279,6 +284,11 @@ public partial class MainWindow : System.Windows.Window
             StatusText.Text = result.Message;
             if (result.HasUpdate && result.Info is not null)
             {
+                if (!showLatestMessage)
+                {
+                    _trayService?.ShowBalloon("DIndex", result.Message + " トレイの更新確認から開始できます。");
+                    return;
+                }
                 var answer = System.Windows.MessageBox.Show($"{result.Message}\r\n今すぐ更新しますか？", "DIndex Update", System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Information);
                 if (answer == System.Windows.MessageBoxResult.Yes)
                 {
@@ -305,6 +315,14 @@ public partial class MainWindow : System.Windows.Window
         {
             UpdateButton.IsEnabled = true;
         }
+    }
+
+    private void ShowPersistentWarning(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return;
+        StartupWarningText.Text = string.IsNullOrWhiteSpace(StartupWarningText.Text)
+            ? message : StartupWarningText.Text + "\n" + message;
+        StartupWarningText.Visibility = System.Windows.Visibility.Visible;
     }
 
     private void SaveSettings()

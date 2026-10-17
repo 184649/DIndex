@@ -39,7 +39,7 @@ Set-Content -LiteralPath (Join-Path $testRoot 'notes-報告書.txt') -Value 'tes
 
 起動直後は画面を表示せず、タスクトレイに常駐します。隠れているアイコンも確認し、DIndexをダブルクリックして開いてください。ウィンドウを閉じても常駐します。終了はトレイの「終了」です。
 
-通常の保存先は `%LOCALAPPDATA%\DIndex` です。`DINDEX_DATA_DIR` はそのプロセスの保存先を明示的に変更します。上のPowerShellを閉じると子プロセス用設定は引き継がれなくなります。既存データへ切り替える前に正常なbackupを保管し、アプリを終了してください。
+この開発版の既定保存先は `%LOCALAPPDATA%\DIndex-Preview`、通常版は `%LOCALAPPDATA%\DIndex` です。`DINDEX_DATA_DIR` はそのプロセスの保存先を明示的に変更します。上のPowerShellを閉じると子プロセス用設定は引き継がれなくなります。既存データへ切り替える前に正常なbackupを保管し、アプリを終了してください。
 
 ## 確認方法
 
