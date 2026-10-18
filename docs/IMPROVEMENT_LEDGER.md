@@ -67,3 +67,18 @@
 - 実装: 空の索引または対象変更時に、未完了であることを示した段階的な検索可能snapshot。同一対象で既存結果がある再走査では巨大な途中コピーを省きます。最終索引の正確性、取消/世代/対象除外、既存結果保持を含む41コアケースがLinuxで通過。詳細と不利な測定も tests/DIndex.Core.Tests/INITIAL_RESULTS_BENCHMARK.md に保存。Windows/GUI確認とは区別します。
 - 未達: 未走査の場所にあるファイルを直ちに検索すること、Cドライブ全体の索引完了時間、Windows描画を含む初表示、Everythingとの同条件比較。
 - EverythingのNTFS索引は低レベルアクセスとUSN Journalを使用する方式で、サービスまたは管理者権限が必要です。現在の通常フォルダー列挙＋FileSystemWatcherとは仕組みが異なります。段階表示は全走査を不要にするものではありません。公式根拠: https://www.voidtools.com/faq/
+
+## 2026-10-18 実機フィードバック対応: 閉じる際の常駐通知
+
+- ウィンドウを閉じるたびに表示していた「タスクトレイで動作中」の通知呼出しだけを削除。閉じる操作の取消と非表示、トレイからの再表示・終了、更新通知は維持します。
+- `python tests/verify_window_close.py` で閉じるイベントの接続、通知なしの取消・非表示、トレイの再表示・終了、更新通知保持を検査します。これはソース契約の検査であり、Windows GUI実操作の代替ではありません。
+- Linux検証: 新規ソース契約4/4（修正前は通知なし契約が失敗）、索引コア41/41、保存・更新安全性106/106、packaging契約17/17が通過。C#構文39ファイルにエラーなし。Windows本体ビルド・MSI・GUI受入は別途確認が必要です。
+- Windowsでの反復close/reopenとAlt+F4は `WINDOWS_ACCEPTANCE.md` の受入条件に追加。version・更新channelの判断は別に行います。
+
+## 通常公開版からの更新互換（1.1.2）
+
+- 公開1.0.1の実EXEを実行せず静的解析し、固定更新feedが184649/DIndex/main/version.json、旧Updater引数がprocessId/appPath/appZip URL/restartであることを確認。
+- 旧版は毎回Updaterを取得するため、新Updaterに今回release専用のURL/SHA-256/versionを埋め込む互換入口を追加。hashなしで任意packageを受け付けるfallbackは追加しない。
+- 通常版は従来のLocalAppData/DIndexを使用。preview/MSIを通常portableへ無断移行しない。旧版の準備前終了は変えられず、元プロセスの同一性を確証できない失敗時は自動再起動を控え、旧EXEを保持する。
+- 追加回帰は旧引数/固定metadata/改ざん/版比較/現行handshake/保存先継承/プロセス同一性を対象とする。Windows生成packageと公開URL経由の旧EXE置換は独立したリリースゲート。
+- 通常CIはread-onlyを維持。今回の公開だけ承認済みのjob-scoped書込権限を使用し、公開後撤去する。配布tagと実ソースcommitを区別し、実ソースarchiveと出典を公開する。

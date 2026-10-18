@@ -17,6 +17,7 @@
     <Compile Include="../../src/DIndex/UpdateService.cs" Link="Source/UpdateService.cs" />
     <Compile Include="../../src/Shared/UpdatePackageSafety.cs" Link="Source/UpdatePackageSafety.cs" />
     <Compile Include="../../src/Shared/InstallationMode.cs" Link="Source/InstallationMode.cs" />
+    <Compile Include="../../src/DIndexUpdater/LegacyUpdateMetadata.cs" Link="Source/LegacyUpdateMetadata.cs" />
     <Compile Include="../../src/DIndexUpdater/Program.cs" Link="Source/UpdaterProgram.cs" />
   </ItemGroup>
 </Project>

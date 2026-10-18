@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Net.Http;
 using System.Security.Cryptography;
 using DIndex.Updating;
 
@@ -7,7 +8,11 @@ namespace DIndexUpdater;
 
 internal static class Program
 {
-    private static async Task<int> Main(string[] args)
+    private static Task<int> Main(string[] args) => RunAsync(args);
+
+    internal static async Task<int> RunAsync(string[] args, HttpClient? httpClient = null,
+        Func<LegacyUpdateMetadata>? legacyMetadataLoader = null, Func<string, Version>? versionReader = null,
+        Func<ProcessStartInfo, Process>? processStarter = null, Action<Exception, string?>? errorLogger = null)
     {
         string? workDirectory = null;
         string? stagedExecutable = null;
@@ -16,21 +21,20 @@ internal static class Program
         var restart = false;
         var originalExited = false;
         var installed = false;
+        var legacyInvocation = false;
+        Process? verifiedLegacyProcess = null;
+        FileStream? updateLock = null;
         try
         {
             var options = ParseArgs(args);
             if (!options.TryGetValue("processId", out var processIdText) || !int.TryParse(processIdText, out var processId) || processId <= 0 ||
                 !options.TryGetValue("appPath", out var rawAppPath) || !Path.IsPathFullyQualified(rawAppPath) ||
-                !options.TryGetValue("appSha256", out var appSha256) ||
                 (options.ContainsKey("appZip") == options.ContainsKey("appZipPath")))
                 throw new ArgumentException("Usage: DIndexUpdater --processId <id> --appPath <absolute path> (--appZipPath <path> | --appZip <official URL>) --appSha256 <SHA-256> [--restart]");
-            UpdatePackageSafety.ValidateHash(appSha256);
+            legacyInvocation = IsLegacyInvocation(options);
+            if (!legacyInvocation) UpdatePackageSafety.ValidateHash(options["appSha256"]);
             restart = options.ContainsKey("restart");
-            if (options.TryGetValue("dataDirectory", out dataDirectory))
-            {
-                if (!Path.IsPathFullyQualified(dataDirectory)) throw new ArgumentException("The data directory must be absolute.");
-                dataDirectory = Path.GetFullPath(dataDirectory);
-            }
+            dataDirectory = ResolveDataDirectory(options);
             if (options.ContainsKey("readyFile") != options.ContainsKey("proceedFile")) throw new ArgumentException("Both handshake paths must be provided.");
             if (options.ContainsKey("readyFile") && (!Path.IsPathFullyQualified(options["readyFile"]) || !Path.IsPathFullyQualified(options["proceedFile"])))
                 throw new ArgumentException("Handshake paths must be absolute.");
@@ -43,7 +47,14 @@ internal static class Program
             InstallationMode.ThrowIfMsiManaged(appDirectory);
             appPathForRecovery = appPath;
             // One updater per installation. Never kill an application or replace files while it is still running.
-            using var updateLock = new FileStream(Path.Combine(appDirectory, ".dindex-update.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose);
+            updateLock = new FileStream(Path.Combine(appDirectory, ".dindex-update.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose);
+            // Keep a verified process handle before any operation that can fail. The old
+            // public app exits immediately; a missing/reused PID is never recovery proof.
+            if (legacyInvocation) verifiedLegacyProcess = CaptureOriginalProcess(processId, appPath);
+            var legacyMetadata = legacyInvocation ? (legacyMetadataLoader ?? LegacyUpdateMetadata.LoadEmbedded)() : null;
+            var appSha256 = legacyMetadata is not null
+                ? legacyMetadata.GetVerifiedHash(options["appZip"], appPath, versionReader)
+                : options["appSha256"];
             workDirectory = Path.Combine(Path.GetTempPath(), "DIndexUpdater", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(workDirectory);
             var zipPath = Path.Combine(workDirectory, "DIndex.zip");
@@ -55,9 +66,10 @@ internal static class Program
             }
             else
             {
-                await UpdatePackageSafety.DownloadVerifiedAsync(options["appZip"], zipPath, appSha256, CancellationToken.None);
+                await UpdatePackageSafety.DownloadVerifiedAsync(options["appZip"], zipPath, appSha256, CancellationToken.None, httpClient);
             }
             var executable = await UpdatePackageSafety.ExtractExecutableAsync(zipPath, Path.Combine(workDirectory, "extract"), "DIndex.exe", CancellationToken.None);
+            legacyMetadata?.ValidateExecutableVersion(executable, versionReader);
             stagedExecutable = Path.Combine(appDirectory, $".DIndex.{Guid.NewGuid():N}.staged");
             using (var input = File.OpenRead(executable))
             using (var output = new FileStream(stagedExecutable, FileMode.CreateNew, FileAccess.Write, FileShare.None))
@@ -80,7 +92,7 @@ internal static class Program
             {
                 try
                 {
-                    using var process = StartApplication(appPath, dataDirectory);
+                    using var process = StartApplication(appPath, dataDirectory, processStarter);
                     var exited = process.WaitForExitAsync();
                     if (await Task.WhenAny(exited, Task.Delay(TimeSpan.FromSeconds(2))) == exited)
                         throw new InvalidOperationException($"The updated application exited immediately (code {process.ExitCode}).");
@@ -88,7 +100,7 @@ internal static class Program
                 catch (Exception restartError)
                 {
                     Rollback(appPath);
-                    try { using var restored = StartApplication(appPath, dataDirectory); }
+                    try { using var restored = StartApplication(appPath, dataDirectory, processStarter); }
                     catch (Exception recoveryError) { throw new AggregateException("Update startup failed. The previous executable was restored, but automatic restart also failed.", restartError, recoveryError); }
                     throw new InvalidOperationException("Update startup failed. The previous executable was restored and restarted.", restartError);
                 }
@@ -99,16 +111,20 @@ internal static class Program
         catch (Exception ex)
         {
             Console.Error.WriteLine(ex);
+            if (legacyInvocation && restart && !installed && appPathForRecovery is not null)
+                originalExited = await CanRecoverLegacyAsync(verifiedLegacyProcess, appPathForRecovery, TimeSpan.FromSeconds(5));
             if (restart && originalExited && !installed && appPathForRecovery is not null && File.Exists(appPathForRecovery))
             {
-                try { using var restored = StartApplication(appPathForRecovery, dataDirectory); }
+                try { using var restored = StartApplication(appPathForRecovery, dataDirectory, processStarter); }
                 catch (Exception restartError) { ex = new AggregateException("Update failed; automatic restart of the previous application also failed.", ex, restartError); }
             }
-            WriteErrorLog(ex, dataDirectory);
+            (errorLogger ?? WriteErrorLog)(ex, dataDirectory);
             return 1;
         }
         finally
         {
+            verifiedLegacyProcess?.Dispose();
+            updateLock?.Dispose();
             if (stagedExecutable is not null) UpdatePackageSafety.TryDelete(stagedExecutable);
             if (workDirectory is not null)
             {
@@ -117,6 +133,86 @@ internal static class Program
                 catch (UnauthorizedAccessException) { }
             }
         }
+    }
+
+    internal static bool IsLegacyInvocation(IReadOnlyDictionary<string, string> options)
+    {
+        if (options.ContainsKey("appSha256")) return false;
+        if ((options.Count == 3 || (options.Count == 4 && options.ContainsKey("restart"))) &&
+            options.ContainsKey("processId") && options.ContainsKey("appPath") && options.ContainsKey("appZip")) return true;
+        throw new ArgumentException("A SHA-256 is required except for the exact public v1.0.1 updater invocation.");
+    }
+
+    internal static string? ResolveDataDirectory(IReadOnlyDictionary<string, string> options)
+    {
+        var directory = options.TryGetValue("dataDirectory", out var selected)
+            ? selected : Environment.GetEnvironmentVariable("DINDEX_DATA_DIR");
+        if (string.IsNullOrWhiteSpace(directory)) return null;
+        if (!Path.IsPathFullyQualified(directory)) throw new ArgumentException("The data directory must be absolute.");
+        return Path.GetFullPath(directory);
+    }
+
+    internal static Process? CaptureOriginalProcess(int processId, string appPath)
+    {
+        Process process;
+        try { process = Process.GetProcessById(processId); }
+        catch (ArgumentException) { return null; }
+        return CaptureOriginalProcess(process, appPath);
+    }
+
+    // Takes ownership of the lookup result, including when the process exits before its handle is opened.
+    internal static Process? CaptureOriginalProcess(Process process, string appPath)
+    {
+        try
+        {
+            // Retaining this handle prevents a recycled PID from becoming recovery proof.
+            try { _ = process.SafeHandle; }
+            catch (Exception) when (HasDefinitelyExited(process)) { process.Dispose(); return null; }
+            if (process.HasExited) { process.Dispose(); return null; }
+            string? processPath;
+            try { processPath = process.MainModule?.FileName; }
+            catch (Exception) when (HasDefinitelyExited(process)) { process.Dispose(); return null; }
+            if (processPath is null || !Path.GetFullPath(processPath).Equals(Path.GetFullPath(appPath), StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("The supplied process ID does not belong to this DIndex installation.");
+            return process;
+        }
+        catch { process.Dispose(); throw; }
+    }
+
+    private static bool HasDefinitelyExited(Process process)
+    {
+        try { return process.HasExited; }
+        catch (Exception) { return false; }
+    }
+
+    internal static async Task<bool> CanRecoverLegacyAsync(Process? verifiedProcess, string appPath, TimeSpan timeout,
+        Func<string, bool>? hasRunningApplication = null)
+    {
+        if (verifiedProcess is null) return false;
+        try
+        {
+            using var cancellation = new CancellationTokenSource(timeout);
+            await verifiedProcess.WaitForExitAsync(cancellation.Token);
+            return !(hasRunningApplication ?? HasRunningApplication)(appPath);
+        }
+        // Failure to establish both exit and absence of another instance is not permission to restart.
+        catch (Exception) { return false; }
+    }
+
+    private static bool HasRunningApplication(string appPath)
+    {
+        var processes = Process.GetProcessesByName(Path.GetFileNameWithoutExtension(appPath));
+        try
+        {
+            foreach (var process in processes)
+            {
+                if (process.HasExited) continue;
+                var path = process.MainModule?.FileName;
+                if (path is null || Path.GetFullPath(path).Equals(Path.GetFullPath(appPath), StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
+        }
+        finally { foreach (var process in processes) process.Dispose(); }
     }
 
     internal static void InstallVerifiedExecutable(string stagedExecutable, string appPath, Action<string, string, string>? replace = null)
@@ -176,7 +272,8 @@ internal static class Program
         finally { UpdatePackageSafety.TryDelete(recovery); }
     }
 
-    private static Process StartApplication(string appPath, string? dataDirectory) => Process.Start(CreateRestartStartInfo(appPath, dataDirectory))
+    private static Process StartApplication(string appPath, string? dataDirectory, Func<ProcessStartInfo, Process>? processStarter = null) =>
+        (processStarter is null ? Process.Start(CreateRestartStartInfo(appPath, dataDirectory)) : processStarter(CreateRestartStartInfo(appPath, dataDirectory)))
         ?? throw new InvalidOperationException("DIndex could not be started.");
 
     internal static ProcessStartInfo CreateRestartStartInfo(string appPath, string? dataDirectory)

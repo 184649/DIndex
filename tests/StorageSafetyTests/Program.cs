@@ -11,7 +11,7 @@ using Updater = DIndexUpdater.Program;
 
 namespace StorageSafetyTests;
 
-internal static class Program
+internal static partial class Program
 {
     private static readonly List<object> Results = new();
     private static readonly string Root = Path.Combine(Path.GetTempPath(), "DIndex-StorageSafety-" + Guid.NewGuid().ToString("N"));
@@ -21,6 +21,12 @@ internal static class Program
     private static async Task<int> Main(string[] args)
     {
         if (args.Length == 1 && args[0] == "--exit-immediately") return 0;
+        if (args.Length == 2 && args[0] == "--wait-for-exit-file")
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            while (!File.Exists(args[1])) await Task.Delay(20, timeout.Token);
+            return 0;
+        }
         Directory.CreateDirectory(Root);
         // No production profile is used, even by tests which exercise default constructors.
         Environment.SetEnvironmentVariable("DINDEX_DATA_DIR", Path.Combine(Root, "profile"));
@@ -29,6 +35,7 @@ internal static class Program
         await SettingsSchemaTests();
         await PackageTests();
         await UpdaterTests();
+        await LegacyUpdaterTests();
         await InstalledModeTests();
         Console.WriteLine($"Storage safety: {_passed} passed, {_failed} failed.");
         if (args.Length > 0) File.WriteAllText(Path.GetFullPath(args[0]), JsonSerializer.Serialize(new { passed = _passed, failed = _failed, results = Results }, new JsonSerializerOptions { WriteIndented = true }));

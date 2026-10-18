@@ -44,7 +44,7 @@ internal static class UpdatePackageSafety
         return true;
     }
 
-    internal static async Task DownloadVerifiedAsync(string url, string destination, string expectedSha256, CancellationToken cancellationToken)
+    internal static async Task DownloadVerifiedAsync(string url, string destination, string expectedSha256, CancellationToken cancellationToken, HttpClient? httpClient = null)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromMinutes(3));
@@ -52,7 +52,7 @@ internal static class UpdatePackageSafety
         var uri = ValidatePackageUrl(url);
         ValidateHash(expectedSha256);
         cancellationToken.ThrowIfCancellationRequested();
-        using var response = await GetResponseAsync(uri, cancellationToken).ConfigureAwait(false);
+        using var response = await GetResponseAsync(uri, cancellationToken, httpClient ?? Http).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
         if (response.Content.Headers.ContentLength is long length && (length <= 0 || length > MaximumPackageBytes))
             throw new InvalidDataException("更新パッケージのサイズが不正です。");
@@ -85,11 +85,11 @@ internal static class UpdatePackageSafety
         }
     }
 
-    private static async Task<HttpResponseMessage> GetResponseAsync(Uri uri, CancellationToken cancellationToken)
+    private static async Task<HttpResponseMessage> GetResponseAsync(Uri uri, CancellationToken cancellationToken, HttpClient http)
     {
         for (var redirects = 0; redirects <= 5; redirects++)
         {
-            var response = await Http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            var response = await http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
             if (response.StatusCode is not (HttpStatusCode.MovedPermanently or HttpStatusCode.Redirect or HttpStatusCode.SeeOther or HttpStatusCode.TemporaryRedirect or HttpStatusCode.PermanentRedirect))
                 return response;
             var location = response.Headers.Location;

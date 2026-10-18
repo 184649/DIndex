@@ -469,7 +469,6 @@ public partial class MainWindow : System.Windows.Window
         if (_allowClose) return;
         e.Cancel = true;
         Hide();
-        _trayService?.ShowBalloon("DIndex", "DIndexはタスクトレイで動作中です。終了する場合はトレイメニューの「終了」を選択してください。");
     }
 }
 

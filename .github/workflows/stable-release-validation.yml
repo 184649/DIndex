@@ -1,0 +1,43 @@
+name: Stable release validation
+on:
+  push:
+    branches: [improve/performance-reliability-20261017]
+permissions:
+  contents: read
+jobs:
+  stable-package:
+    if: github.event.repository.private == false
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Select preinstalled .NET 10 SDK without installation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sdk = dotnet --list-sdks | ForEach-Object { if ($_ -match '^(10\.0\.\d+) ') { $Matches[1] } } | Sort-Object { [version]$_ } -Descending | Select-Object -First 1
+          if (-not $sdk) { throw 'Preinstalled .NET 10 SDK is required.' }
+          @{ sdk = @{ version = $sdk; rollForward = 'disable' } } | ConvertTo-Json -Depth 3 | Set-Content global.json -Encoding utf8
+          dotnet --info
+      - name: Parse packaging and publication PowerShell without invoking publication
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem scripts -Filter '*.ps1' | ForEach-Object {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+      - name: Stable package fail-closed preflight regression
+        shell: pwsh
+        run: ./tests/StableRelease.Tests.ps1
+      - name: Build and verify stable self-contained packages without publishing
+        shell: pwsh
+        run: |
+          ./scripts/Build-StableRelease.ps1 -Version 1.1.2 -SourceCommit '${{ github.sha }}' -OutputDirectory "$env:RUNNER_TEMP\stable-release"
+          Get-Content "$env:RUNNER_TEMP\stable-release\verified-release.json" -Raw | Write-Host
+      - name: Legacy updater and storage regression
+        shell: pwsh
+        run: ./scripts/Test-PackagedRuntime.ps1 -Project tests/StorageSafetyTests/StorageSafetyTests.csproj -OutputDirectory "$env:RUNNER_TEMP\release-safety-tests"
