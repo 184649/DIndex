@@ -23,6 +23,9 @@ internal static partial class Program
         if (args.Length == 1 && args[0] == "--exit-immediately") return 0;
         if (args.Length == 2 && args[0] == "--wait-for-exit-file")
         {
+            var readyFile = args[1] + ".ready";
+            File.WriteAllText(readyFile + ".tmp", JsonSerializer.Serialize(new { processId = Environment.ProcessId, processPath = Environment.ProcessPath }));
+            File.Move(readyFile + ".tmp", readyFile);
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             while (!File.Exists(args[1])) await Task.Delay(20, timeout.Token);
             return 0;

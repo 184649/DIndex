@@ -40,13 +40,59 @@ internal static partial class Program
         }
     }
 
-    private static Process StartWaitingTestProcess(string exitFile)
+    private sealed class WaitingTestProcess : IDisposable
+    {
+        internal Process Process { get; }
+        private readonly string _exitFile;
+
+        internal WaitingTestProcess(Process process, string exitFile) { Process = process; _exitFile = exitFile; }
+
+        public void Dispose()
+        {
+            try
+            {
+                if (Process.HasExited) return;
+                File.WriteAllText(_exitFile, "exit");
+                if (!Process.WaitForExit(5000))
+                {
+                    // This is only the child created and retained by this fixture, never a PID lookup.
+                    Process.Kill(entireProcessTree: false);
+                    if (!Process.WaitForExit(5000)) throw new TimeoutException("The owned test child did not stop.");
+                }
+            }
+            finally { Process.Dispose(); }
+        }
+    }
+
+    private static WaitingTestProcess StartWaitingTestProcess(string exitFile)
     {
         var start = new ProcessStartInfo { FileName = Environment.ProcessPath!, UseShellExecute = false };
         if (Path.GetFileNameWithoutExtension(start.FileName).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
             start.ArgumentList.Add(System.Reflection.Assembly.GetExecutingAssembly().Location);
         start.ArgumentList.Add("--wait-for-exit-file"); start.ArgumentList.Add(exitFile);
-        return Process.Start(start)!;
+        var fixture = new WaitingTestProcess(Process.Start(start)!, exitFile);
+        try
+        {
+            // Process.Start does not guarantee that Windows has loaded MainModule yet.
+            // Establish the controlled child's managed-code readiness before testing identity.
+            var readyFile = exitFile + ".ready"; var elapsed = Stopwatch.StartNew();
+            while (!File.Exists(readyFile))
+            {
+                if (fixture.Process.HasExited) throw new InvalidOperationException($"Test child {fixture.Process.Id} exited before readiness (code {fixture.Process.ExitCode}).");
+                if (elapsed.Elapsed > TimeSpan.FromSeconds(10)) throw new TimeoutException($"Test child {fixture.Process.Id} did not signal readiness.");
+                Thread.Sleep(10);
+            }
+            using var ready = JsonDocument.Parse(File.ReadAllText(readyFile));
+            var childPid = ready.RootElement.GetProperty("processId").GetInt32();
+            var childPath = ready.RootElement.GetProperty("processPath").GetString();
+            var inspectedPath = fixture.Process.MainModule?.FileName;
+            True(childPid == fixture.Process.Id && childPath is not null && inspectedPath is not null &&
+                Path.GetFullPath(childPath).Equals(Path.GetFullPath(start.FileName), StringComparison.OrdinalIgnoreCase) &&
+                Path.GetFullPath(inspectedPath).Equals(Path.GetFullPath(start.FileName), StringComparison.OrdinalIgnoreCase),
+                $"Ready child identity mismatch: started PID={fixture.Process.Id}, ready PID={childPid}, expected='{start.FileName}', ready='{childPath ?? "<null>"}', inspected='{inspectedPath ?? "<null>"}'.");
+            return fixture;
+        }
+        catch { fixture.Dispose(); throw; }
     }
 
     private static async Task LegacyUpdaterTests()
@@ -207,19 +253,21 @@ internal static partial class Program
             using var handler = new StubHttpHandler(request => request.RequestUri!.Host == "github.com"
                 ? new HttpResponseMessage(HttpStatusCode.Redirect) { Headers = { Location = new Uri("https://release-assets.githubusercontent.com/verified?token=test") } }
                 : new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) });
-            using var client = new HttpClient(handler); var exitFile = Path.Combine(directory, "exit"); Process? restarted = null;
+            using var client = new HttpClient(handler); var exitFile = Path.Combine(directory, "exit"); WaitingTestProcess? restarted = null;
             try
             {
                 Equal(0, await RunUpdaterAsync(LegacyArgs(app), client, () => pin, path => path == app ? OldVersion : NewVersion, start =>
                 {
                     Equal(app, start.FileName); Equal(directory, start.WorkingDirectory); Equal(false, start.UseShellExecute);
-                    restarted = StartWaitingTestProcess(exitFile); return restarted;
+                    restarted = StartWaitingTestProcess(exitFile);
+                    // The updater owns/disposes its handle; the fixture retains another for guaranteed cleanup.
+                    return Process.GetProcessById(restarted.Process.Id);
                 }));
                 True(Executable(2).SequenceEqual(File.ReadAllBytes(app)), "Verified package not installed.");
                 True(Executable(1).SequenceEqual(File.ReadAllBytes(app + ".bak")), "Original backup not retained.");
                 Equal(2, handler.Requests.Count);
             }
-            finally { File.WriteAllText(exitFile, "exit"); restarted?.Dispose(); }
+            finally { restarted?.Dispose(); }
         });
 
         await Test("Modern local SHA and handshake succeed without consulting legacy metadata or network", async () =>
@@ -278,13 +326,40 @@ internal static partial class Program
             using var verified = Updater.CaptureOriginalProcess(Environment.ProcessId, Environment.ProcessPath!);
             Equal(false, await Updater.CanRecoverLegacyAsync(verified, Environment.ProcessPath!, TimeSpan.FromMilliseconds(10), _ => false));
         });
+        await Test("Legacy ready-process identity is stable across repeated child starts", () => Run(() =>
+        {
+            for (var iteration = 0; iteration < 20; iteration++)
+            {
+                var exitFile = Path.Combine(Fixture("legacy-ready-repeat"), "exit");
+                using var fixture = StartWaitingTestProcess(exitFile);
+                using var verified = Updater.CaptureOriginalProcess(fixture.Process.Id, Environment.ProcessPath!);
+                True(verified is not null && !verified.HasExited, $"Ready child capture failed on iteration {iteration}.");
+            }
+        }));
+        await Test("Legacy owned test child is stopped when an assertion fails", async () =>
+        {
+            Process? observed = null;
+            try
+            {
+                await Throws<InvalidOperationException>(() => Run(() =>
+                {
+                    var exitFile = Path.Combine(Fixture("legacy-ready-cleanup"), "exit");
+                    using var fixture = StartWaitingTestProcess(exitFile);
+                    observed = Process.GetProcessById(fixture.Process.Id);
+                    _ = observed.SafeHandle;
+                    throw new InvalidOperationException("Injected assertion failure after child readiness.");
+                }));
+                True(observed is not null && observed.HasExited, "An owned test child survived the failed assertion.");
+            }
+            finally { observed?.Dispose(); }
+        });
         await Test("Legacy recovery requires verified exit and no duplicate or uncertain process", async () =>
         {
             var directory = Fixture("legacy-recovery"); var exitFile = Path.Combine(directory, "exit");
-            using var process = StartWaitingTestProcess(exitFile);
-            using var verified = Updater.CaptureOriginalProcess(process.Id, Environment.ProcessPath!);
+            using var fixture = StartWaitingTestProcess(exitFile);
+            using var verified = Updater.CaptureOriginalProcess(fixture.Process.Id, Environment.ProcessPath!);
             True(verified is not null, "Live matching process was not captured.");
-            File.WriteAllText(exitFile, "exit"); await process.WaitForExitAsync();
+            File.WriteAllText(exitFile, "exit"); await fixture.Process.WaitForExitAsync();
             Equal(true, await Updater.CanRecoverLegacyAsync(verified, Environment.ProcessPath!, TimeSpan.FromSeconds(1), _ => false));
             Equal(false, await Updater.CanRecoverLegacyAsync(verified, Environment.ProcessPath!, TimeSpan.FromSeconds(1), _ => true));
             Equal(false, await Updater.CanRecoverLegacyAsync(verified, Environment.ProcessPath!, TimeSpan.FromSeconds(1), _ => throw new IOException("Cannot inspect process.")));
@@ -295,8 +370,8 @@ internal static partial class Program
             var exitFile = Path.Combine(Fixture("legacy-capture-race"), "exit");
             using var caller = StartWaitingTestProcess(exitFile);
             // Match production's lazy GetProcessById result without first opening its handle.
-            using var lookup = Process.GetProcessById(caller.Id);
-            File.WriteAllText(exitFile, "exit"); await caller.WaitForExitAsync();
+            using var lookup = Process.GetProcessById(caller.Process.Id);
+            File.WriteAllText(exitFile, "exit"); await caller.Process.WaitForExitAsync();
             using var captured = Updater.CaptureOriginalProcess(lookup, Environment.ProcessPath!);
             True(captured is null, "An exited-before-capture caller became recovery proof.");
             Equal(false, await Updater.CanRecoverLegacyAsync(captured, Environment.ProcessPath!, TimeSpan.Zero, _ => false));
