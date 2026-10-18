@@ -1,6 +1,8 @@
-﻿{
-    "version":  "1.0.1",
-    "downloadUrl":  "https://raw.githubusercontent.com/Chairman-bits/DIndex/main/DIndex.zip",
-    "updaterUrl":  "https://raw.githubusercontent.com/Chairman-bits/DIndex/main/DIndexUpdater.zip",
-    "releaseNotes":  "https://raw.githubusercontent.com/Chairman-bits/DIndex/main/release-notes.json"
+{
+  "version": "1.1.2",
+  "downloadUrl": "https://github.com/184649/DIndex/releases/download/v1.1.2/DIndex.zip",
+  "updaterUrl": "https://github.com/184649/DIndex/releases/download/v1.1.2/DIndexUpdater.zip",
+  "downloadSha256": "0EF77AD1FF3CA2FC1B7D069FF51E50DAB134009876BAC4E93AC706810112322A",
+  "updaterSha256": "ED328A4317878B253C865B91FD5399264F24B061A1B0B26D53DCBED4664119ED",
+  "releaseNotes": "https://github.com/184649/DIndex/releases/download/v1.1.2/release-notes.json"
 }
