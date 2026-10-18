@@ -17,7 +17,7 @@ restricted to the official NuGet source. The pinned runtime defaults to 10.0.13.
 ./tests/StableRelease.Tests.ps1
 ./scripts/Build-StableRelease.ps1 -Version 1.1.2 `
   -SourceCommit (git rev-parse HEAD) `
-  -OutputDirectory "$env:RUNNER_TEMP/stable-release"
+  -OutputDirectory "$env:TEMP/DIndex-1.1.2-release"
 ```
 
 `OutputDirectory` must not exist, including an empty existing directory. The

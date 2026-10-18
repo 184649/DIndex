@@ -55,6 +55,10 @@ function Invoke-SourceGit([string]$Git, [string]$Repository, [string[]]$Argument
     $start.StandardOutputEncoding = [Text.UTF8Encoding]::new($false, $true)
     $start.ArgumentList.Add('--literal-pathspecs')
     $start.ArgumentList.Add('-C'); $start.ArgumentList.Add($Repository)
+    # Git archive honors core.autocrlf and can otherwise rewrite committed LF
+    # blobs on Windows. These per-process overrides never change Git settings.
+    $start.ArgumentList.Add('-c'); $start.ArgumentList.Add('core.autocrlf=false')
+    $start.ArgumentList.Add('-c'); $start.ArgumentList.Add('core.eol=lf')
     foreach ($argument in $Arguments) { $start.ArgumentList.Add($argument) }
     $process = [Diagnostics.Process]::new(); $process.StartInfo = $start
     try {

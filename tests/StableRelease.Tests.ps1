@@ -67,8 +67,10 @@ function Invoke-FixtureGit([string[]]$Arguments) {
 }
 try {
     $null = Invoke-FixtureGit @('init', '--quiet')
+    # Reproduce Windows runner conversion without changing user/global settings.
+    $null = Invoke-FixtureGit @('config', '--local', 'core.autocrlf', 'true')
     foreach ($name in @('source.txt', 'my [literal] file.cs', 'DIndex.zip', 'DIndexUpdater.zip', 'src/bin/stale.dll', 'src/obj/stale.cs')) {
-        [IO.File]::WriteAllText((Join-Path $fixtureRepo $name), "fixture bytes: $name", [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $fixtureRepo $name), "fixture bytes: $name`n", [Text.UTF8Encoding]::new($false))
     }
     $null = Invoke-FixtureGit @('-c','core.autocrlf=false','add','--all')
     $null = Invoke-FixtureGit @('-c','user.name=Release Test','-c','user.email=release-test@example.invalid','commit','--quiet','-m','Synthetic export fixture')
