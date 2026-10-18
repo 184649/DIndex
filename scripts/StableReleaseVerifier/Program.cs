@@ -100,9 +100,10 @@ internal static class Program
     }
     internal static Dictionary<string, byte[]> ReadBundle(byte[] exe)
     {
-        // The marker lives in the native apphost, before the bundled files.
-        var prefix = exe.AsSpan(0, Math.Min(exe.Length, 4 * 1024 * 1024));
-        var marker = prefix.IndexOf(Signature);
+        Require(exe.Length > Signature.Length + 8 && exe.Length <= MaxExeBytes, "Invalid executable size for bundle inspection.");
+        // Native resources (including this app's icon) can place the apphost
+        // marker beyond 4 MiB. Search the whole already-bounded executable.
+        var marker = exe.AsSpan().IndexOf(Signature);
         Require(marker >= 8, "Missing .NET single-file bundle marker.");
         var offset = BitConverter.ToInt64(exe, marker - 8);
         Require(offset > marker + Signature.Length && offset < exe.Length - 12, "Invalid bundle header offset.");

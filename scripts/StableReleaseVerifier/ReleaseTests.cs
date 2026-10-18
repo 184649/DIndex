@@ -12,11 +12,12 @@ internal static class ReleaseTests
         try { run(); } catch (Exception ex) when (ex is InvalidDataException or JsonException or BadImageFormatException or EndOfStreamException or KeyNotFoundException) { return; }
         throw new Exception("Expected fail-closed rejection.");
     }
-    internal static byte[] Bundle(params (string Name, byte[] Bytes)[] entries)
+    internal static byte[] Bundle(params (string Name, byte[] Bytes)[] entries) => BundleAt(16, entries);
+    internal static byte[] BundleAt(int markerOffset, params (string Name, byte[] Bytes)[] entries)
     {
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream, Encoding.UTF8, true);
-        writer.Write(new byte[64]);
+        writer.Write(new byte[markerOffset + 48]);
         var locations = new List<(string Name, long Offset, byte[] Bytes)>();
         foreach (var entry in entries) { locations.Add((entry.Name, stream.Position, entry.Bytes)); writer.Write(entry.Bytes); }
         var offset = stream.Position;
@@ -27,7 +28,7 @@ internal static class ReleaseTests
         {
             writer.Write(entry.Offset); writer.Write((long)entry.Bytes.Length); writer.Write(0L); writer.Write((byte)1); writer.Write(entry.Name);
         }
-        stream.Position = 8; writer.Write(offset); writer.Write(Program.Signature);
+        stream.Position = markerOffset - 8; writer.Write(offset); writer.Write(Program.Signature);
         return stream.ToArray();
     }
     static void Zip(string path, params string[] names)
@@ -124,6 +125,14 @@ internal static class ReleaseTests
                 Test("reject compiled pin mismatch " + field, () => { var wrong = new Dictionary<string, string>(pin) { [field] = "wrong" }; Reject(() => Program.VerifyPin(JsonSerializer.SerializeToUtf8Bytes(wrong), "1.1.2", new string('A', 64))); });
             var bundle = Bundle(("StableReleaseVerifier.dll", assembly));
             Test("inspect assembly bytes from final single-file bundle", () => Program.InspectAssembly(Program.ReadBundle(bundle)["StableReleaseVerifier.dll"], "StableReleaseVerifier", "1.1.2"));
+            Test("inspect bundle marker beyond 4 MiB native resources", () => Program.InspectAssembly(Program.ReadBundle(BundleAt(7951408, ("StableReleaseVerifier.dll", assembly)))["StableReleaseVerifier.dll"], "StableReleaseVerifier", "1.1.2"));
+            Test("accept marker with exactly eight pointer bytes before it", () => Program.Require(Program.ReadBundle(BundleAt(8, ("fixture.dll", new byte[1]))).Count == 1, "Minimum marker offset failed."));
+            Test("reject marker without eight pointer bytes", () => { var bad = new byte[100]; Program.Signature.CopyTo(bad, 7); Reject(() => Program.ReadBundle(bad)); });
+            Test("reject truncated signature at file end", () => { var bad = new byte[100]; Program.Signature.AsSpan(0, 31).CopyTo(bad.AsSpan(69)); Reject(() => Program.ReadBundle(bad)); });
+            Test("reject header overlapping marker boundary", () => { var bad = (byte[])bundle.Clone(); BitConverter.GetBytes(48L).CopyTo(bad, 8); Reject(() => Program.ReadBundle(bad)); });
+            Test("reject header at truncated final twelve bytes", () => { var bad = (byte[])bundle.Clone(); BitConverter.GetBytes((long)bad.Length - 12).CopyTo(bad, 8); Reject(() => Program.ReadBundle(bad)); });
+            Test("reject negative header pointer", () => { var bad = (byte[])bundle.Clone(); BitConverter.GetBytes(-1L).CopyTo(bad, 8); Reject(() => Program.ReadBundle(bad)); });
+            Test("reject unknown bundle format after valid marker", () => { var bad = (byte[])bundle.Clone(); var offset = BitConverter.ToInt64(bad, 8); BitConverter.GetBytes(7u).CopyTo(bad, checked((int)offset)); Reject(() => Program.ReadBundle(bad)); });
             Test("reject missing single-file marker", () => Reject(() => Program.ReadBundle(new byte[100])));
             Test("reject bundle header beyond file", () => { var bad = (byte[])bundle.Clone(); BitConverter.GetBytes(long.MaxValue).CopyTo(bad, 8); Reject(() => Program.ReadBundle(bad)); });
             foreach (var name in new[] { "../data", "settings.json", "index-cache.tsv", "DIndex.pdb", "installed-by-msi.json" })
