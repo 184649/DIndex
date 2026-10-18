@@ -75,14 +75,10 @@ internal static partial class Program
         {
             // Process.Start does not guarantee that Windows has loaded MainModule yet.
             // Establish the controlled child's managed-code readiness before testing identity.
-            var readyFile = exitFile + ".ready"; var elapsed = Stopwatch.StartNew();
-            while (!File.Exists(readyFile))
+            using var ready = ReadTestProcessReady(exitFile + ".ready", TimeSpan.FromSeconds(10), () =>
             {
                 if (fixture.Process.HasExited) throw new InvalidOperationException($"Test child {fixture.Process.Id} exited before readiness (code {fixture.Process.ExitCode}).");
-                if (elapsed.Elapsed > TimeSpan.FromSeconds(10)) throw new TimeoutException($"Test child {fixture.Process.Id} did not signal readiness.");
-                Thread.Sleep(10);
-            }
-            using var ready = JsonDocument.Parse(File.ReadAllText(readyFile));
+            });
             var childPid = ready.RootElement.GetProperty("processId").GetInt32();
             var childPath = ready.RootElement.GetProperty("processPath").GetString();
             var inspectedPath = fixture.Process.MainModule?.FileName;
@@ -94,6 +90,36 @@ internal static partial class Program
         }
         catch { fixture.Dispose(); throw; }
     }
+
+    private static JsonDocument ReadTestProcessReady(string readyFile, TimeSpan timeout,
+        Action? checkChild = null, Action<IOException>? onSharingConflict = null)
+    {
+        var elapsed = Stopwatch.StartNew(); IOException? lastSharingError = null;
+        while (elapsed.Elapsed < timeout)
+        {
+            checkChild?.Invoke();
+            try
+            {
+                // Atomic rename can expose the completed file before its delete-access
+                // handle closes. Permit that handle, but never accept partially written JSON.
+                using var input = new FileStream(readyFile, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+                return JsonDocument.Parse(input);
+            }
+            catch (FileNotFoundException) { } // The child has not published its ready file yet.
+            catch (IOException ex) when (IsReadySharingConflict(ex))
+            {
+                lastSharingError = ex;
+                onSharingConflict?.Invoke(ex);
+            }
+            Thread.Sleep(10);
+        }
+        throw new TimeoutException($"Test child readiness could not be read within {timeout}: {readyFile}", lastSharingError);
+    }
+
+    private static bool IsReadySharingConflict(IOException error) =>
+        error.HResult is unchecked((int)0x80070020) or unchecked((int)0x80070021) ||
+        // FileStream reports the corresponding advisory-sharing conflict as EAGAIN on Unix.
+        (!OperatingSystem.IsWindows() && error.HResult is 11 or 35);
 
     private static async Task LegacyUpdaterTests()
     {
@@ -336,6 +362,40 @@ internal static partial class Program
                 True(verified is not null && !verified.HasExited, $"Ready child capture failed on iteration {iteration}.");
             }
         }));
+        await Test("Legacy readiness retries a real sharing lock and reads complete identity after release", () => Run(() =>
+        {
+            var readyFile = Path.Combine(Fixture("legacy-ready-sharing"), "ready");
+            File.WriteAllText(readyFile, JsonSerializer.Serialize(new { processId = Environment.ProcessId, processPath = Environment.ProcessPath }));
+            using var locked = new FileStream(readyFile, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            var conflicts = 0;
+            using var ready = ReadTestProcessReady(readyFile, TimeSpan.FromSeconds(2), onSharingConflict: _ =>
+            {
+                conflicts++; locked.Dispose(); // Deterministically release only after the reader hits the lock.
+            });
+            Equal(1, conflicts);
+            Equal(Environment.ProcessId, ready.RootElement.GetProperty("processId").GetInt32());
+            Equal(Environment.ProcessPath, ready.RootElement.GetProperty("processPath").GetString());
+        }));
+        await Test("Legacy readiness persistent sharing lock respects its overall deadline", async () =>
+        {
+            var readyFile = Path.Combine(Fixture("legacy-ready-locked"), "ready"); File.WriteAllText(readyFile, "{}");
+            using var locked = new FileStream(readyFile, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            var elapsed = Stopwatch.StartNew(); var conflicts = 0;
+            await Throws<TimeoutException>(() => Run(() => ReadTestProcessReady(readyFile, TimeSpan.FromMilliseconds(30),
+                onSharingConflict: _ => conflicts++)));
+            True(conflicts > 0, "The fixture never exercised the sharing conflict.");
+            True(elapsed.Elapsed < TimeSpan.FromSeconds(2), "Sharing retries exceeded the bounded deadline.");
+        });
+        await Test("Legacy readiness missing file times out and malformed JSON is never retried", async () =>
+        {
+            var readyFile = Path.Combine(Fixture("legacy-ready-invalid"), "ready");
+            await Throws<TimeoutException>(() => Run(() => ReadTestProcessReady(readyFile, TimeSpan.FromMilliseconds(20))));
+            File.WriteAllText(readyFile, "{invalid"); var attempts = 0; var conflicts = 0;
+            await Throws<JsonException>(() => Run(() => ReadTestProcessReady(readyFile, TimeSpan.FromSeconds(2),
+                () => attempts++, _ => conflicts++)));
+            Equal(1, attempts); Equal(0, conflicts);
+            True(!IsReadySharingConflict(new IOException("Unrelated I/O failure.")), "Unrelated I/O was treated as transient sharing.");
+        });
         await Test("Legacy owned test child is stopped when an assertion fails", async () =>
         {
             Process? observed = null;
