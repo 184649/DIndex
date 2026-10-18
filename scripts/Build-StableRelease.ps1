@@ -115,10 +115,15 @@ try {
     if ($LASTEXITCODE -ne 0 -or ($cacheLines -join '') -notmatch 'global-packages:\s*(.+)') { throw 'Cannot locate official runtime license notices.' }
     $cache = $Matches[1].Trim()
     $notices = [Collections.Generic.List[string]]::new()
+    $coreClrReference = $null
     foreach ($package in @('Microsoft.NETCore.App.Runtime.win-x64', 'Microsoft.WindowsDesktop.App.Runtime.win-x64')) {
         $roots = @((Join-Path $cache "$($package.ToLowerInvariant())/$RuntimeFrameworkVersion"), (Join-Path (Split-Path $dotnet -Parent) "packs/$package/$RuntimeFrameworkVersion"))
         $pack = $roots | Where-Object { Test-Path -LiteralPath $_ -PathType Container } | Select-Object -First 1
         if (-not $pack) { throw "Cannot find official runtime pack $package/$RuntimeFrameworkVersion." }
+        if ($package -eq 'Microsoft.NETCore.App.Runtime.win-x64') {
+            $coreClrReference = Join-Path $pack 'runtimes/win-x64/native/coreclr.dll'
+            if (-not (Test-Path -LiteralPath $coreClrReference -PathType Leaf)) { throw 'Exact restored CoreCLR reference is missing.' }
+        }
         $files = @(Get-ChildItem -LiteralPath $pack -File | Where-Object { $_.Name -match '^(LICENSE|THIRD[-_ ]?PARTY[-_ ]?NOTICES|NOTICE)(\..*)?$' } | Sort-Object Name)
         if (-not ($files | Where-Object Name -Match '^LICENSE')) { throw "Missing runtime license in $pack" }
         if ($package -like 'Microsoft.NETCore*' -and -not ($files | Where-Object Name -Match '^(THIRD|NOTICE)')) { throw 'Missing .NET runtime third-party notices.' }
@@ -133,15 +138,20 @@ try {
     Invoke-Checked @('build', $verifier, '-c', 'Release', '-o', $verifierOutput, '--artifacts-path', (Join-Path $work 'verifier-artifacts'), '-p:RestoreSources=https://api.nuget.org/v3/index.json')
     $verifierDll = Join-Path $verifierOutput 'StableReleaseVerifier.dll'
     Invoke-Checked @($verifierDll, 'self-test')
-    Invoke-Checked @($verifierDll, 'verify', $assets, $Version, $RuntimeFrameworkVersion)
+    $runtimeProofPath = Join-Path $work 'native-runtime-proof.json'
+    Invoke-Checked @($verifierDll, 'verify', $assets, $Version, $RuntimeFrameworkVersion, $coreClrReference, $runtimeProofPath)
+    $runtimeSmokeDirectory = Join-Path $work 'runtime-smoke'
+    Invoke-Checked @($verifierDll, 'smoke', (Join-Path $work 'DIndex-publish/DIndex.exe'), (Join-Path $work 'DIndexUpdater-publish/DIndexUpdater.exe'), $Version, $runtimeSmokeDirectory)
     # This marker is written only after all checks; failed directories are diagnostic only.
     [ordered]@{ version = $Version; repository = '184649/DIndex'; sourceCommit = $SourceCommit; sdk = $sdk; runtime = $RuntimeFrameworkVersion; assetDirectory = $assets;
         sourceSnapshot = @{ sourceTree = $sourceSnapshot.sourceTree; filterId = $sourceSnapshot.filterId; includedPathsSha256 = $sourceSnapshot.includedPathsSha256; includedCount = $sourceSnapshot.includedCount; excludedCount = $sourceSnapshot.excludedCount };
+        runtimeProof = (Get-Content -LiteralPath $runtimeProofPath -Raw | ConvertFrom-Json -Depth 10);
+        runtimeSmoke = (Get-Content -LiteralPath (Join-Path $runtimeSmokeDirectory 'smoke-proof.json') -Raw | ConvertFrom-Json -Depth 5);
         unsigned = $true; profile = '%LocalAppData%\DIndex'; verified = $true; published = $false;
         downloadSha256 = $appHash; updaterSha256 = $updaterHash;
         appExeSha256 = (Get-FileHash -LiteralPath (Join-Path $work 'DIndex-publish/DIndex.exe') -Algorithm SHA256).Hash;
         updaterExeSha256 = (Get-FileHash -LiteralPath (Join-Path $work 'DIndexUpdater-publish/DIndexUpdater.exe') -Algorithm SHA256).Hash;
         assets = @($assetNames | ForEach-Object { @{ name = $_; sha256 = (Get-FileHash -LiteralPath (Join-Path $assets $_) -Algorithm SHA256).Hash } }) } |
-        ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'verified-release.json') -Encoding utf8NoBOM
+        ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'verified-release.json') -Encoding utf8NoBOM
     Write-Host "Verified local stable release assets: $assets. Nothing has been published."
 } finally { Pop-Location }

@@ -64,6 +64,7 @@ internal static class ReleaseTests
         Directory.CreateDirectory(directory);
         try
         {
+            NativeRuntimeTests.Run(Test, Reject);
             Test("real ZIP Create-mode timestamp before stream and stable bytes", () =>
             {
                 var input = Path.Combine(directory, "fixture.exe");
@@ -138,8 +139,9 @@ internal static class ReleaseTests
             foreach (var name in new[] { "../data", "settings.json", "index-cache.tsv", "DIndex.pdb", "installed-by-msi.json" })
                 Test("reject forbidden bundle content " + name, () => Reject(() => Program.ReadBundle(Bundle((name, new byte[1])))));
             Test("reject duplicate case-folded bundle paths", () => Reject(() => Program.ReadBundle(Bundle(("DIndex.dll", new byte[1]), ("dindex.dll", new byte[1])))));
-            var runtime = new Dictionary<string, byte[]> { ["coreclr.dll"] = [], ["clrjit.dll"] = [], ["System.Private.CoreLib.dll"] = [], ["DIndexUpdater.dll"] = [], ["DIndexUpdater.runtimeconfig.json"] = Encoding.UTF8.GetBytes("{\"runtimeOptions\":{\"includedFrameworks\":[{\"name\":\"Microsoft.NETCore.App\",\"version\":\"10.0.13\"}]}}") };
+            var runtime = new Dictionary<string, byte[]> { ["System.Private.CoreLib.dll"] = [], ["DIndexUpdater.dll"] = [], ["DIndexUpdater.runtimeconfig.json"] = Encoding.UTF8.GetBytes("{\"runtimeOptions\":{\"includedFrameworks\":[{\"name\":\"Microsoft.NETCore.App\",\"version\":\"10.0.13\"}]}}") };
             Test("accept exact self-contained runtime manifest", () => Program.InspectRuntime(runtime, "DIndexUpdater", "10.0.13", false));
+            Test("reject missing bundled CoreLib with static host", () => { var missing = new Dictionary<string, byte[]>(runtime); missing.Remove("System.Private.CoreLib.dll"); Reject(() => Program.InspectRuntime(missing, "DIndexUpdater", "10.0.13", false)); });
             Test("reject stale runtime manifest", () => Reject(() => Program.InspectRuntime(runtime, "DIndexUpdater", "10.0.12", false)));
             Test("reject framework-dependent runtime manifest", () => { runtime["DIndexUpdater.runtimeconfig.json"] = Encoding.UTF8.GetBytes("{\"runtimeOptions\":{\"framework\":{\"name\":\"Microsoft.NETCore.App\",\"version\":\"10.0.13\"}}}"); Reject(() => Program.InspectRuntime(runtime, "DIndexUpdater", "10.0.13", false)); });
             Console.WriteLine($"PASS {passed} bounded release-verifier tests (synthetic files only).");

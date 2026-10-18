@@ -38,7 +38,8 @@ Production builds must use the committed `net10.0-windows`/`net10.0` project
 targets. All assembly/file/informational version properties are explicitly
 overridden to `1.1.2.0`/`1.1.2`; source revision suffixes are disabled. The stable
 app therefore keeps `%LocalAppData%\DIndex`, while the MSI preview retains its
-separate preview profile. No app or updater is launched by this packaging step.
+separate preview profile. Runtime smoke tests use only disposable copies of the
+new executables and a synthetic profile; the old public EXE is never executed.
 
 The security-sensitive sequence is:
 
@@ -57,12 +58,21 @@ The security-sensitive sequence is:
    the ZIPs: x64 native apphost versions, bundled managed assembly versions,
    informational versions with no preview suffix, bundled self-contained runtime
    versions, and the compiled updater pin matching the app ZIP and exact URL.
+   Check the native PE export table and exported `RuntimeInfo` ABI against the
+   exact restored runtime pack's CoreCLR file version and module identity.
+6. Start disposable copies of the new EXEs with invalid per-process `DOTNET_ROOT`
+   and `DOTNET_ROOT_X64`, disabled runtime roll-forward, and a synthetic profile.
+   An MSI marker beside only the disposable copies prevents automatic update
+   networking; it is never included in the ZIPs. Confirm app managed startup
+   with empty search roots, then stop that process. Exercise only the updater's
+   expected missing-installation preflight error, before any update can run.
 
 `release/` contains `DIndex.zip`, `DIndexUpdater.zip`, `version.json`,
 `release-notes.json`, `THIRD-PARTY-NOTICES.txt`, and `SHA256SUMS`. No PDB, profile,
 cache or MSI marker is accepted. `verified-release.json` beside `release/`
 records the source commit/tree, filtered path-list hash/counts, repository,
-SDK/runtime, both ZIP and EXE hashes, all asset hashes, and `verified: true`,
+SDK/runtime, native runtime identity proof, isolated startup results, both ZIP
+and EXE hashes, all asset hashes, and `verified: true`,
 `published: false`. The source manifest records every retained/excluded path.
 
 The verifier intentionally rejects extra/stale files in its release directory.
@@ -76,7 +86,14 @@ and the updater's compiled app pin.
 `tests/StableRelease.Tests.ps1` checks PowerShell syntax, invalid versions/URLs,
 invalid source/runtime inputs, and preserving existing output. It performs no
 build or profile access. The verifier's `self-test` exercises synthetic archive,
-checksum, stale artifact, bundle, compiled metadata and runtime failures.
+checksum, stale artifact, bundle, compiled metadata and runtime failures. Native
+runtime regressions use real PE export structures, including zero-initialized
+data exports; arbitrary embedded strings do not prove a static runtime.
+
+The Windows CI runner still has SDKs installed, so invalidating process-local
+runtime roots is not a completely clean-machine test. Startup smoke corroborates
+the independent native runtime identity and bundled-framework checks. No global
+runtime settings are changed, no real profile is used, and no old EXE is run.
 
 For an already-installed .NET 8 SDK on a non-Windows test host:
 
@@ -101,3 +118,14 @@ Bundle validation uses the official .NET format 6 layout documented in
 [FileEntry.cs](https://github.com/dotnet/runtime/blob/v10.0.0/src/installer/managed/Microsoft.NET.HostModel/Bundle/FileEntry.cs),
 and [Bundler.cs](https://github.com/dotnet/runtime/blob/v10.0.0/src/installer/managed/Microsoft.NET.HostModel/Bundle/Bundler.cs).
 It rejects compressed/unknown formats instead of guessing.
+
+Windows single-file hosts statically link CoreCLR and the JIT, rather than
+carrying `coreclr.dll` and `clrjit.dll` as separate bundle entries. The native
+checks follow the official
+[single-file host link configuration](https://github.com/dotnet/runtime/blob/v10.0.0/src/native/corehost/apphost/static/CMakeLists.txt),
+[static CoreCLR/JIT link configuration](https://github.com/dotnet/runtime/blob/v10.0.0/src/coreclr/dlls/mscoree/coreclr/CMakeLists.txt),
+[export declarations](https://github.com/dotnet/runtime/blob/v10.0.0/src/native/corehost/apphost/static/singlefilehost.def),
+[RuntimeInfo ABI](https://github.com/dotnet/runtime/blob/v10.0.0/src/coreclr/debug/inc/runtimeinfo.h),
+and [Windows module-index generator](https://github.com/dotnet/runtime/blob/v10.0.0/eng/native/genmoduleindex.cmd).
+The SDK's [host-pack resolver](https://github.com/dotnet/sdk/blob/v10.0.100/src/Tasks/Microsoft.NET.Build.Tasks/ResolveAppHosts.cs)
+applies `RuntimeFrameworkVersion` to the single-file host pack too.

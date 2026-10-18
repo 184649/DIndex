@@ -8,7 +8,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
-// Offline inspection only. Never loads/executes a release assembly or accesses a profile.
+// The verify mode inspects files only; the separate smoke mode runs disposable
+// copies of NEW executables with a synthetic profile (see RuntimeSmoke.cs).
 // Bundle v6 layout: dotnet/runtime v10.0.0, Microsoft.NET.HostModel/Bundle/{Manifest,FileEntry}.cs.
 internal static class Program
 {
@@ -20,13 +21,21 @@ internal static class Program
         try
         {
             if (args is ["self-test"]) { SelfTest(); return 0; }
-            if (args is ["verify", var directory, var version, var runtime])
+            if (args is ["smoke", var app, var updater, var appVersion, var smokeRoot])
             {
-                VerifyRelease(directory, version, runtime);
+                RuntimeSmoke.Run(app, updater, appVersion, smokeRoot);
+                Console.WriteLine("PASS isolated new-app/new-updater managed startup smoke; no machine-wide settings changed.");
+                return 0;
+            }
+            if (args is ["verify", var directory, var version, var runtime, var runtimeReference, var proofPath])
+            {
+                var proof = VerifyRelease(directory, version, runtime, runtimeReference);
+                using (var output = new FileStream(proofPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    JsonSerializer.Serialize(output, proof, new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
                 Console.WriteLine($"PASS stable release {version}: both ZIP hashes, all asset checksums, native and bundled versions, embedded updater pin, self-contained .NET {runtime}.");
                 return 0;
             }
-            throw new ArgumentException("Usage: StableReleaseVerifier self-test | verify <release-directory> <stable-version> <runtime-version>");
+            throw new ArgumentException("Usage: StableReleaseVerifier self-test | verify <release-directory> <stable-version> <runtime-version> <runtime-pack-coreclr.dll> <new-proof-json> | smoke <new-app.exe> <new-updater.exe> <stable-version> <new-directory>");
         }
         catch (Exception ex) { Console.Error.WriteLine("FAIL: " + ex.Message); return 1; }
     }
@@ -184,7 +193,9 @@ internal static class Program
     }
     internal static void InspectRuntime(Dictionary<string, byte[]> bundle, string name, string runtime, bool desktop)
     {
-        foreach (var file in new[] { "coreclr.dll", "clrjit.dll", "System.Private.CoreLib.dll", name + ".dll", name + ".runtimeconfig.json" })
+        // CoreCLR/JIT are statically linked into Windows singlefilehost and are
+        // independently verified via native PE exports and runtime-pack identity.
+        foreach (var file in new[] { "System.Private.CoreLib.dll", name + ".dll", name + ".runtimeconfig.json" })
             Require(bundle.ContainsKey(file), "Self-contained single-file payload is incomplete: " + file);
         if (desktop) Require(bundle.ContainsKey("PresentationFramework.dll"), "Missing bundled WindowsDesktop runtime.");
         using var json = Json(bundle[name + ".runtimeconfig.json"]);
@@ -209,23 +220,29 @@ internal static class Program
         }
         finally { File.Delete(temporary); }
     }
-    internal static void VerifyRelease(string directory, string version, string runtime)
+    internal static object VerifyRelease(string directory, string version, string runtime, string runtimeReference)
     {
         Require(Regex.IsMatch(runtime, @"\A10\.0\.(0|[1-9][0-9]*)\z"), "Expected a stable .NET 10 runtime.");
         VerifyAllChecksums(directory);
         var hashes = VerifyFeed(directory, version);
         using var notes = Json(File.ReadAllBytes(Path.Combine(directory, "release-notes.json")));
         Require(Text(notes.RootElement, "version") == version, "Release notes version mismatch.");
+        var reference = NativeRuntime.ReadReference(runtimeReference, runtime);
+        var nativeProofs = new Dictionary<string, NativeRuntime.Identity>(StringComparer.Ordinal);
         foreach (var name in new[] { "DIndex", "DIndexUpdater" })
         {
             var exe = ReadSingleExe(Path.Combine(directory, name + ".zip"), name + ".exe");
             InspectHost(exe, version);
+            var nativeRuntime = NativeRuntime.Inspect(exe);
+            NativeRuntime.Match(nativeRuntime, reference);
+            nativeProofs.Add(name, nativeRuntime);
             var bundle = ReadBundle(exe);
             InspectRuntime(bundle, name, runtime, name == "DIndex");
             var pin = InspectAssembly(bundle[name + ".dll"], name, version, name == "DIndexUpdater" ? "DIndexUpdater.LegacyUpdate.json" : null);
             if (name != "DIndexUpdater") continue;
             VerifyPin(pin, version, hashes.AppHash);
         }
+        return new { kind = "PE-exports-and-runtime-info", reference, executables = nativeProofs };
     }
     internal static void VerifyPin(byte[] pin, string version, string hash)
     {

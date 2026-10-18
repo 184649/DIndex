@@ -185,9 +185,18 @@ $hashLines | Set-Content -LiteralPath (Join-Path $assets 'SHA256SUMS.txt') -Enco
 $assetNames += 'SHA256SUMS.txt'
 $expectedHashes = @{}
 foreach ($name in $assetNames) { $expectedHashes[$name] = (Get-FileHash -LiteralPath (Join-Path $assets $name) -Algorithm SHA256).Hash }
+# Capture the exact feed bytes before any remote mutation. A single bounded log
+# record after success permits lossless retrieval even if text-asset downloads
+# are unavailable; consumers must still compare the public asset API digest.
+$feedBytes = [IO.File]::ReadAllBytes((Join-Path $assets 'version.json'))
+if ($feedBytes.Length -le 0 -or $feedBytes.Length -gt 4096 -or
+    [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($feedBytes)) -ine $expectedHashes['version.json']) {
+    throw 'The verified feed must be nonempty, at most 4 KiB, and byte-identical to the staged release asset.'
+}
 $pendingText = 'Public-asset compatibility validation is in progress. The update feed has not been activated. This prerelease is promoted only after the isolated legacy upgrade test passes.'
 $body = @"
 Application source: https://github.com/$repo/tree/$SourceCommit
+Build provenance: $releaseBase/build-provenance.json
 Curated application source archive: DIndex-1.1.2-source.zip, selected from the exact source commit above. Tracked bin/obj directories and the historical root DIndex.zip/DIndexUpdater.zip are excluded; DIndex-1.1.2-source-manifest.json records every included and excluded path. This is the same source selection used for the verified build.
 This release tag identifies a distribution snapshot; GitHub's automatic tag archives are not the application source.
 
@@ -202,8 +211,35 @@ $statePath = Join-Path $stage 'publication-state.json'
 $state = [ordered]@{ version=$version; sourceCommit=$SourceCommit; distributionCommit=$DistributionCommit; phase='validated-local-and-remote'; releaseId=$null; releaseUrl=$null; feedChanged=$false }
 function Set-Phase([string]$Phase) {
     $state.phase = $Phase
+    $phaseRecord = $state | ConvertTo-Json -Depth 3 -Compress
+    if ([Text.Encoding]::UTF8.GetByteCount($phaseRecord) -gt 4096) { throw 'Publication phase record exceeds the 4 KiB bound.' }
     $state | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $statePath -Encoding utf8NoBOM
-    Write-Host "Publication phase: $Phase. Evidence retained: $stage"
+    Write-Host ('DINDEX_PUBLICATION_PHASE_V1 ' + $phaseRecord)
+    Write-Host "Runner-local evidence directory: $stage. Compact evidence is retained in the job log."
+}
+function Write-LegacySummary {
+    # Run on both success and failure. Log only bounded public identifiers and
+    # result flags/counts; never serialize exception text or environment values.
+    $summary = [ordered]@{ schemaVersion=1; release=$tag; sourceCommit=$SourceCommit; releaseId=$state.releaseId;
+        evidenceAvailable=$false; success=$false; legacyAppExecuted=$null; updaterExitCode=$null;
+        appZipSha256=$manifest.downloadSha256; updaterZipSha256=$manifest.updaterSha256;
+        expectedManifestSha256=$expectedHashes['version.json']; checksPassed=0; cleanupErrorCount=$null;
+        legacyRestartRequested=$false }
+    try {
+        $records = @(Get-ChildItem -LiteralPath $legacyEvidence -Filter 'test-results.json' -File -Recurse)
+        if ($records.Count -eq 1 -and $records[0].Length -le 1048576) {
+            $record = Get-Content -LiteralPath $records[0].FullName -Raw | ConvertFrom-Json -Depth 10
+            if ($record.success -is [bool] -and $record.legacyAppExecuted -is [bool] -and $record.release -ceq $tag -and
+                $record.appZipSha256 -ieq $manifest.downloadSha256 -and $record.updaterZipSha256 -ieq $manifest.updaterSha256) {
+                $summary.evidenceAvailable = $true; $summary.success = $record.success; $summary.legacyAppExecuted = $record.legacyAppExecuted
+                $summary.checksPassed = @($record.checks).Count; $summary.cleanupErrorCount = @($record.cleanupErrors).Count
+                if ($record.PSObject.Properties['updaterExitCode']) { $summary.updaterExitCode = [int]$record.updaterExitCode }
+            }
+        }
+    } catch { Write-Warning 'The compact legacy result could not be read; no exception text or environment data is included.' }
+    $line = $summary | ConvertTo-Json -Depth 3 -Compress
+    if ([Text.Encoding]::UTF8.GetByteCount($line) -le 4096) { Write-Host ('DINDEX_LEGACY_RESULT_V1 ' + $line) }
+    else { Write-Warning 'The compact legacy result exceeded the 4 KiB bound and was not printed.' }
 }
 function Assert-MainUnchanged {
     $currentMain = Invoke-GhJson @("repos/$repo/git/ref/heads/main")
@@ -258,8 +294,10 @@ try {
     Assert-ReleaseState $public $false $true
     Assert-PublishedTag
     Set-Phase 'public-prerelease-awaiting-legacy-validation'
-    & (Join-Path $PSScriptRoot 'Test-PublishedLegacyUpgrade.ps1') -ExpectedManifestPath (Join-Path $assets 'version.json') -OutputDirectory $legacyEvidence
-    if (-not $?) { throw 'Legacy published-asset upgrade validation failed; release remains prerelease and feed is unchanged.' }
+    try {
+        & (Join-Path $PSScriptRoot 'Test-PublishedLegacyUpgrade.ps1') -ExpectedManifestPath (Join-Path $assets 'version.json') -OutputDirectory $legacyEvidence
+        if (-not $?) { throw 'Legacy published-asset upgrade validation failed; release remains prerelease and feed is unchanged.' }
+    } finally { Write-LegacySummary }
     $resultFiles = @(Get-ChildItem -LiteralPath $legacyEvidence -Filter 'test-results.json' -File -Recurse)
     if ($resultFiles.Count -ne 1) { throw 'The legacy test did not produce one unambiguous result record.' }
     $legacy = Get-Content -LiteralPath $resultFiles[0].FullName -Raw | ConvertFrom-Json
@@ -286,6 +324,13 @@ try {
     Get-Content -LiteralPath (Join-Path $assets 'version.json') -Raw | Write-Host
     $provenance | ConvertTo-Json -Depth 6 | Write-Host
     $hashLines | Write-Host
+    $successRecord = [ordered]@{
+        schemaVersion=1; repository=$repo; tag=$tag; version=$version; sourceCommit=$SourceCommit; distributionCommit=$DistributionCommit;
+        releaseId=$release.id; manifestAssetId=$remoteAssetIds['version.json']; manifestByteLength=$feedBytes.Length;
+        manifestSha256=$expectedHashes['version.json'].ToLowerInvariant(); manifestBase64=[Convert]::ToBase64String($feedBytes)
+    } | ConvertTo-Json -Depth 3 -Compress
+    if ([Text.Encoding]::UTF8.GetByteCount($successRecord) -gt 16384) { throw 'Verified-release log record exceeds the 16 KiB bound; retrieve and verify the public feed asset directly.' }
+    Write-Host ('DINDEX_VERIFIED_RELEASE_V1 ' + $successRecord)
 } catch {
     Write-Warning "Publication stopped in phase '$($state.phase)'. No release/tag was deleted or retried. Inspect $statePath and the remote state before taking further action. The discovery feed was not changed."
     throw
