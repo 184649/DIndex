@@ -31,7 +31,7 @@ foreach ($entry in @(@('src/DIndex/DIndex.csproj', 'net10.0-windows'), @('src/DI
 $git = (Get-Command git.exe -ErrorAction Stop).Source
 $head = (& $git -C $repo rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $head -cne $SourceCommit) { throw 'SourceCommit does not match the checked-out source HEAD.' }
-& $git -C $repo diff --quiet HEAD -- src scripts/Build-StableRelease.ps1 scripts/StableReleaseVerifier
+& $git -C $repo diff --quiet HEAD -- src scripts/Build-StableRelease.ps1 scripts/Export-ReleaseSource.ps1 scripts/StableReleaseVerifier
 if ($LASTEXITCODE -ne 0) { throw 'Release source or packaging has uncommitted tracked changes.' }
 $untracked = @(& $git -C $repo ls-files --others --exclude-standard -- src scripts/StableReleaseVerifier)
 if ($LASTEXITCODE -ne 0 -or $untracked.Count) { throw 'Untracked source/verification files would make source provenance incomplete.' }
@@ -45,13 +45,11 @@ $work = Join-Path $OutputDirectory 'work'
 $assets = Join-Path $OutputDirectory 'release'
 $sdkContext = Join-Path $work 'sdk-context'
 foreach ($path in @($work, $assets, $sdkContext)) { [void][IO.Directory]::CreateDirectory($path) }
-# Compile an exact tracked-source snapshot. Earlier validation jobs may have left
-# obj/bin trees in the checkout; changing intermediate paths alone can expose
-# those stale generated .cs files to SDK globs. No checkout output is reused.
+# Compile an exact, filtered tracked-source snapshot. This repository historically
+# tracked generated obj/bin and root ZIPs; the shared export excludes only those.
 $buildRepo = Join-Path $work 'source'
 $sourceArchive = Join-Path $work 'source.zip'
-& $git -C $repo archive --format=zip --output=$sourceArchive $SourceCommit
-if ($LASTEXITCODE -ne 0) { throw 'Could not create exact source commit snapshot.' }
+$sourceSnapshot = & (Join-Path $PSScriptRoot 'Export-ReleaseSource.ps1') -SourceCommit $SourceCommit -RepositoryDirectory $repo -OutputArchive $sourceArchive -ManifestPath (Join-Path $work 'source-manifest.json')
 [IO.Compression.ZipFile]::ExtractToDirectory($sourceArchive, $buildRepo)
 @{ sdk = @{ version = $sdk; rollForward = 'disable'; allowPrerelease = $false } } | ConvertTo-Json | Set-Content (Join-Path $sdkContext 'global.json') -Encoding utf8NoBOM
 function Invoke-Checked([string[]]$Arguments) {
@@ -77,9 +75,16 @@ function Publish-Application([string]$Name, [string]$Framework, [string[]]$Extra
     $zipPath = Join-Path $assets "$Name.zip"
     $zip = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Create)
     try {
-        $entry = [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $published[0].FullName, "$Name.exe", [IO.Compression.CompressionLevel]::Optimal)
+        $entry = $zip.CreateEntry("$Name.exe", [IO.Compression.CompressionLevel]::Optimal)
         # ZIP's minimum timestamp avoids rebuild-time hash churn before pinning.
+        # In Create mode the timestamp must be set BEFORE opening the entry.
         $entry.LastWriteTime = [DateTimeOffset]::new(1980, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
+        $inputStream = [IO.File]::OpenRead($published[0].FullName)
+        try {
+            $outputStream = $entry.Open()
+            try { $inputStream.CopyTo($outputStream) }
+            finally { $outputStream.Dispose() }
+        } finally { $inputStream.Dispose() }
     }
     finally { $zip.Dispose() }
 }
@@ -131,6 +136,7 @@ try {
     Invoke-Checked @($verifierDll, 'verify', $assets, $Version, $RuntimeFrameworkVersion)
     # This marker is written only after all checks; failed directories are diagnostic only.
     [ordered]@{ version = $Version; repository = '184649/DIndex'; sourceCommit = $SourceCommit; sdk = $sdk; runtime = $RuntimeFrameworkVersion; assetDirectory = $assets;
+        sourceSnapshot = @{ sourceTree = $sourceSnapshot.sourceTree; filterId = $sourceSnapshot.filterId; includedPathsSha256 = $sourceSnapshot.includedPathsSha256; includedCount = $sourceSnapshot.includedCount; excludedCount = $sourceSnapshot.excludedCount };
         unsigned = $true; profile = '%LocalAppData%\DIndex'; verified = $true; published = $false;
         downloadSha256 = $appHash; updaterSha256 = $updaterHash;
         appExeSha256 = (Get-FileHash -LiteralPath (Join-Path $work 'DIndex-publish/DIndex.exe') -Algorithm SHA256).Hash;

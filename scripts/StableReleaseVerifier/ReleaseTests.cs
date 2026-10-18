@@ -36,6 +36,15 @@ internal static class ReleaseTests
         using var zip = ZipFile.Open(path, ZipArchiveMode.Create);
         foreach (var name in names) { using var writer = new StreamWriter(zip.CreateEntry(name).Open()); writer.Write("synthetic payload " + name); }
     }
+    static void StableZip(string path, string input)
+    {
+        using var zip = ZipFile.Open(path, ZipArchiveMode.Create);
+        var entry = zip.CreateEntry("DIndex.exe", CompressionLevel.Optimal);
+        entry.LastWriteTime = new DateTimeOffset(1980, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        using var source = File.OpenRead(input);
+        using var destination = entry.Open();
+        source.CopyTo(destination);
+    }
     static Dictionary<string, string> Feed(string directory)
     {
         var url = Program.ReleaseBase("1.1.2");
@@ -54,6 +63,21 @@ internal static class ReleaseTests
         Directory.CreateDirectory(directory);
         try
         {
+            Test("real ZIP Create-mode timestamp before stream and stable bytes", () =>
+            {
+                var input = Path.Combine(directory, "fixture.exe");
+                var first = Path.Combine(directory, "first.zip");
+                var second = Path.Combine(directory, "second.zip");
+                File.WriteAllBytes(input, Encoding.UTF8.GetBytes("synthetic executable bytes"));
+                File.SetLastWriteTimeUtc(input, new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+                StableZip(first, input);
+                File.SetLastWriteTimeUtc(input, new DateTime(2026, 10, 18, 0, 0, 0, DateTimeKind.Utc));
+                StableZip(second, input);
+                Program.Require(Program.Hash(first) == Program.Hash(second), "Source mtime changed package bytes.");
+                using (var zip = ZipFile.OpenRead(first)) Program.Require(zip.Entries.Count == 1 && zip.Entries[0].LastWriteTime.Year == 1980, "Fixed ZIP timestamp was not retained.");
+                Program.Require(Program.ReadSingleExe(first, "DIndex.exe").SequenceEqual(File.ReadAllBytes(input)), "ZIP bytes differ from input.");
+                foreach (var path in new[] { input, first, second }) File.Delete(path);
+            });
             Test("canonical stable version", () => Program.Require(Program.ReleaseBase("1.1.2").EndsWith("/v1.1.2"), "Version mismatch"));
             foreach (var version in new[] { "", "1.1", "1.1.2.0", "1.1.2-preview.1", "v1.1.2", "01.1.2", "1.1.2+foo", "1.1.2\n", "-1.1.2", "65535.1.2", "9999999999999.1.2" })
                 Test("reject malformed version " + version.Replace("\n", "\\n"), () => Reject(() => Program.ReleaseBase(version)));

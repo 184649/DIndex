@@ -23,8 +23,14 @@ restricted to the official NuGet source. The pinned runtime defaults to 10.0.13.
 `OutputDirectory` must not exist, including an empty existing directory. The
 builder never deletes/reuses old output. It also verifies the exact source
 commit and rejects changed/untracked application or verifier sources. It builds
-a fresh `git archive` snapshot of that commit, so old checkout `obj`/`bin` trees
-from earlier validation steps cannot enter SDK compile globs. A failure
+a fresh, filtered `git archive` snapshot of that commit using the same
+`Export-ReleaseSource.ps1` helper used for the published source archive. Only
+case-insensitive `bin`/`obj` path segments and the historical root `DIndex.zip`
+and `DIndexUpdater.zip` are excluded. All other regular tracked files are kept.
+The repository historically tracked generated files; no original checkout file
+is deleted. Literal pathspecs, safe Windows paths, a bounded argument length,
+the exact archive inventory, and each committed Git blob identity are checked.
+Export attributes that omit or transform source therefore fail closed. A failure
 leaves diagnostic files but no `verified-release.json` success marker. Choose a
 new output path before retrying.
 
@@ -55,8 +61,9 @@ The security-sensitive sequence is:
 `release/` contains `DIndex.zip`, `DIndexUpdater.zip`, `version.json`,
 `release-notes.json`, `THIRD-PARTY-NOTICES.txt`, and `SHA256SUMS`. No PDB, profile,
 cache or MSI marker is accepted. `verified-release.json` beside `release/`
-records the source commit, repository, SDK/runtime, both ZIP and EXE hashes, all
-asset hashes, and `verified: true`, `published: false`.
+records the source commit/tree, filtered path-list hash/counts, repository,
+SDK/runtime, both ZIP and EXE hashes, all asset hashes, and `verified: true`,
+`published: false`. The source manifest records every retained/excluded path.
 
 The verifier intentionally rejects extra/stale files in its release directory.
 A separate approved publication step can copy these verified assets to a new

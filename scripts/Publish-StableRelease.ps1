@@ -154,15 +154,32 @@ foreach ($path in @($assets,$verification,$legacyEvidence)) { New-Item -ItemType
 foreach ($name in $baseAssets) { Copy-Item -LiteralPath (Join-Path $root $name) -Destination (Join-Path $assets $name) -ErrorAction Stop }
 foreach ($asset in $verified.assets) { Assert-Hash (Join-Path $assets $asset.name) $asset.sha256 }
 $sourceZip = Join-Path $assets 'DIndex-1.1.2-source.zip'
-$null = Invoke-Git @('archive','--format=zip','--prefix=DIndex-source/',"--output=$sourceZip",$SourceCommit)
+$sourceManifestName = 'DIndex-1.1.2-source-manifest.json'
+$sourceManifestPath = Join-Path $assets $sourceManifestName
+$null = & (Join-Path $PSScriptRoot 'Export-ReleaseSource.ps1') -SourceCommit $SourceCommit -RepositoryDirectory $checkout -OutputArchive $sourceZip -ManifestPath $sourceManifestPath -ArchivePrefix 'DIndex-source/'
+if (-not $?) { throw 'Curated source export failed; nothing has been published.' }
+$sourceSnapshot = Get-Content -LiteralPath $sourceManifestPath -Raw | ConvertFrom-Json -Depth 10
+if ($sourceSnapshot.schemaVersion -ne 1 -or $sourceSnapshot.sourceCommit -cne $SourceCommit -or $sourceSnapshot.sourceTree -cne $sourceTree -or
+    $sourceSnapshot.filterId -cne 'exclude-generated-v1' -or $sourceSnapshot.filterId -cne $verified.sourceSnapshot.filterId -or
+    $sourceSnapshot.sourceTree -cne $verified.sourceSnapshot.sourceTree -or
+    $sourceSnapshot.includedPathsSha256 -ine $verified.sourceSnapshot.includedPathsSha256 -or
+    $sourceSnapshot.includedCount -ne $verified.sourceSnapshot.includedCount -or $sourceSnapshot.excludedCount -ne $verified.sourceSnapshot.excludedCount -or
+    @($sourceSnapshot.includedPaths).Count -ne $sourceSnapshot.includedCount -or @($sourceSnapshot.excludedPaths).Count -ne $sourceSnapshot.excludedCount) {
+    throw 'Published source selection differs from the exact curated snapshot used by the verified build.'
+}
+Assert-Hash $sourceZip $sourceSnapshot.archiveSha256
 $provenance = [ordered]@{ product='DIndex'; repository=$repo; version=$version; sourceCommit=$SourceCommit;
     sourceTree=$sourceTree; distributionCommit=$DistributionCommit; distributionParent=$main.object.sha;
-    sourceArchive='DIndex-1.1.2-source.zip'; sourceArchiveSha256=(Get-FileHash -LiteralPath $sourceZip -Algorithm SHA256).Hash.ToLowerInvariant(); distributionTag=$tag;
+    sourceArchive='DIndex-1.1.2-source.zip'; sourceArchiveSha256=(Get-FileHash -LiteralPath $sourceZip -Algorithm SHA256).Hash.ToLowerInvariant();
+    sourceManifest=$sourceManifestName; sourceManifestSha256=(Get-FileHash -LiteralPath $sourceManifestPath -Algorithm SHA256).Hash.ToLowerInvariant();
+    sourceFilter=$sourceSnapshot.filterId; sourceFilterDescription=$sourceSnapshot.filterDescription;
+    sourceIncludedPathsSha256=$sourceSnapshot.includedPathsSha256; sourceIncludedCount=$sourceSnapshot.includedCount; sourceExcludedCount=$sourceSnapshot.excludedCount;
+    distributionTag=$tag;
     workflowRun="https://github.com/$repo/actions/runs/$env:GITHUB_RUN_ID"; sdk=$verified.sdk; runtime=$verified.runtime;
     appExeSha256=$verified.appExeSha256; updaterExeSha256=$verified.updaterExeSha256;
     signed=$false; profile='%LOCALAPPDATA%\DIndex' }
 $provenance | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $assets 'build-provenance.json') -Encoding utf8NoBOM
-$assetNames = @($baseAssets + @('DIndex-1.1.2-source.zip','build-provenance.json'))
+$assetNames = @($baseAssets + @('DIndex-1.1.2-source.zip',$sourceManifestName,'build-provenance.json'))
 $hashLines = foreach ($name in $assetNames) { "$((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $assets $name)).Hash.ToLowerInvariant())  $name" }
 $hashLines | Set-Content -LiteralPath (Join-Path $assets 'SHA256SUMS.txt') -Encoding utf8NoBOM
 $assetNames += 'SHA256SUMS.txt'
@@ -171,7 +188,8 @@ foreach ($name in $assetNames) { $expectedHashes[$name] = (Get-FileHash -Literal
 $pendingText = 'Public-asset compatibility validation is in progress. The update feed has not been activated. This prerelease is promoted only after the isolated legacy upgrade test passes.'
 $body = @"
 Application source: https://github.com/$repo/tree/$SourceCommit
-Application source archive: DIndex-1.1.2-source.zip. This release tag identifies a distribution snapshot; GitHub's automatic tag archives are not the application source.
+Curated application source archive: DIndex-1.1.2-source.zip, selected from the exact source commit above. Tracked bin/obj directories and the historical root DIndex.zip/DIndexUpdater.zip are excluded; DIndex-1.1.2-source-manifest.json records every included and excluded path. This is the same source selection used for the verified build.
+This release tag identifies a distribution snapshot; GitHub's automatic tag archives are not the application source.
 
 Windows x64, self-contained .NET 10. The redundant close-to-tray balloon is removed. Existing public v1.0.1 users retain the normal DIndex profile and can update via the existing updater after the discovery feed is activated.
 
