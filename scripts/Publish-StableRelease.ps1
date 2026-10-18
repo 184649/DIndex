@@ -38,10 +38,20 @@ function Assert-Hash([string]$Path, [string]$Expected) {
     if ($Expected -cnotmatch '\A[a-fA-F0-9]{64}\z' -or -not (Test-Path -LiteralPath $Path -PathType Leaf) -or
         (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -ine $Expected) { throw "Asset hash mismatch: $Path" }
 }
+function ConvertFrom-ReleaseUtf8Bytes([byte[]]$Bytes) {
+    # GitHub returns repository blobs as raw base64 bytes. Unlike file readers,
+    # UTF8.GetString does not consume a BOM; remove exactly one leading UTF-8
+    # preamble before JSON parsing, without altering the original byte array.
+    if ($null -eq $Bytes -or $Bytes.Length -eq 0 -or $Bytes.Length -gt 1048576) { throw 'Release metadata must be nonempty and no larger than 1 MiB.' }
+    $offset = 0
+    if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xef -and $Bytes[1] -eq 0xbb -and $Bytes[2] -eq 0xbf) { $offset = 3 }
+    if ($Bytes.Length -eq $offset) { throw 'Release metadata contains only a UTF-8 BOM.' }
+    return [Text.UTF8Encoding]::new($false, $true).GetString($Bytes, $offset, $Bytes.Length - $offset)
+}
 function Read-BlobText([string]$Sha) {
     $blob = Invoke-GhJson @("repos/$repo/git/blobs/$Sha")
     if ($blob.sha -cne $Sha -or $blob.encoding -cne 'base64' -or $blob.size -gt 1048576) { throw 'Unexpected distribution metadata blob.' }
-    return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($blob.content))
+    return (ConvertFrom-ReleaseUtf8Bytes ([Convert]::FromBase64String($blob.content)))
 }
 # Resolve git relative to this script, never the caller's current directory.
 if ([IO.Path]::GetFullPath((Invoke-Git @('rev-parse','--show-toplevel'))) -ine [IO.Path]::GetFullPath($checkout) -or
@@ -110,7 +120,7 @@ $distribution = Invoke-GhJson @("repos/$repo/git/commits/$DistributionCommit")
 $main = Invoke-GhJson @("repos/$repo/git/ref/heads/main")
 $currentFeedBlob = Invoke-GhJson @("repos/$repo/contents/version.json?ref=$($main.object.sha)")
 if ($currentFeedBlob.type -cne 'file' -or $currentFeedBlob.encoding -cne 'base64' -or $currentFeedBlob.size -gt 1048576) { throw 'Cannot verify the current discovery feed.' }
-$currentFeed = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($currentFeedBlob.content)) | ConvertFrom-Json
+$currentFeed = (ConvertFrom-ReleaseUtf8Bytes ([Convert]::FromBase64String($currentFeedBlob.content))) | ConvertFrom-Json
 $currentVersion = $null
 if (-not [version]::TryParse([string]$currentFeed.version, [ref]$currentVersion) -or $currentVersion -ge [version]$version -or
     $currentFeed.downloadUrl -like "*/releases/download/$tag/*" -or $currentFeed.updaterUrl -like "*/releases/download/$tag/*") {

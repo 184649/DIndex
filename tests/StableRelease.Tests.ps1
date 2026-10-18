@@ -99,3 +99,49 @@ try {
     Get-ChildItem -LiteralPath $fixture -File -Recurse -Force | ForEach-Object { $_.Attributes = [IO.FileAttributes]::Normal }
     [IO.Directory]::Delete($fixture, $true)
 }
+
+# Publisher GitHub blob UTF-8/BOM regression. Extract only the pure decoder
+# function from its AST; never invoke/dot-source the publisher or any GitHub call.
+$publisherPath = Join-Path $PSScriptRoot '../scripts/Publish-StableRelease.ps1'
+$publisherAst = [Management.Automation.Language.Parser]::ParseFile($publisherPath, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw ($errors | Out-String) }
+$decoderDefinitions = @($publisherAst.FindAll({ param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'ConvertFrom-ReleaseUtf8Bytes'
+}, $false))
+if ($decoderDefinitions.Count -ne 1) { throw 'Expected one pure publisher UTF-8 decoder.' }
+. ([scriptblock]::Create($decoderDefinitions[0].Extent.Text))
+# Exact public main/version.json bytes at commit 3a90f4cb5a0dd3361fc55865feedb804f70e14f3.
+# Preserve the original BOM and bytes; this fixture is read-only and makes no network request.
+$legacyFeedBytes = [Convert]::FromBase64String('77u/ewogICAgInZlcnNpb24iOiAgIjEuMC4xIiwKICAgICJkb3dubG9hZFVybCI6ICAiaHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL0NoYWlybWFuLWJpdHMvREluZGV4L21haW4vREluZGV4LnppcCIsCiAgICAidXBkYXRlclVybCI6ICAiaHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL0NoYWlybWFuLWJpdHMvREluZGV4L21haW4vREluZGV4VXBkYXRlci56aXAiLAogICAgInJlbGVhc2VOb3RlcyI6ICAiaHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL0NoYWlybWFuLWJpdHMvREluZGV4L21haW4vcmVsZWFzZS1ub3Rlcy5qc29uIgp9Cg==')
+$legacyFeedHash = 'E9D2A7C566FB68EA785D6C12D8718FBA7F6A642305497BC38339A311841E03B4'
+if ($legacyFeedBytes.Length -ne 328 -or [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($legacyFeedBytes)) -cne $legacyFeedHash) { throw 'Immutable legacy feed fixture bytes differ.' }
+$legacyFeedText = ConvertFrom-ReleaseUtf8Bytes $legacyFeedBytes
+$legacyFeed = $legacyFeedText | ConvertFrom-Json
+if ($legacyFeed.version -cne '1.0.1' -or
+    $legacyFeed.downloadUrl -cne 'https://raw.githubusercontent.com/Chairman-bits/DIndex/main/DIndex.zip' -or
+    $legacyFeed.updaterUrl -cne 'https://raw.githubusercontent.com/Chairman-bits/DIndex/main/DIndexUpdater.zip' -or
+    $legacyFeed.releaseNotes -cne 'https://raw.githubusercontent.com/Chairman-bits/DIndex/main/release-notes.json') { throw 'Actual BOM-prefixed legacy feed was not decoded faithfully.' }
+if ([Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($legacyFeedBytes)) -cne $legacyFeedHash) { throw 'Decoder changed original legacy feed bytes.' }
+$withoutBom = [byte[]]$legacyFeedBytes[3..($legacyFeedBytes.Length - 1)]
+if ((ConvertFrom-ReleaseUtf8Bytes $withoutBom) -cne $legacyFeedText) { throw 'BOM-free and BOM-prefixed UTF-8 differ after decoding.' }
+$metadataJson = '{"version":"1.1.2","sourceCommit":"1111111111111111111111111111111111111111"}'
+$metadataBytes = [Text.Encoding]::UTF8.GetBytes($metadataJson)
+$prefixedMetadata = [byte[]](@(0xef,0xbb,0xbf) + $metadataBytes)
+$metadata = (ConvertFrom-ReleaseUtf8Bytes $prefixedMetadata) | ConvertFrom-Json
+if ($metadata.version -cne '1.1.2' -or $metadata.sourceCommit -cne $commit) { throw 'BOM-prefixed distribution metadata did not parse.' }
+$embeddedJson = '{"value":"snow: ' + [char]0x96ea + '; embedded BOM: ' + [char]0xfeff + '"}'
+if ((ConvertFrom-ReleaseUtf8Bytes ([Text.Encoding]::UTF8.GetBytes($embeddedJson))) -cne $embeddedJson) { throw 'Decoder altered valid non-ASCII or embedded U+FEFF text.' }
+$metadataRejects = 0
+function Assert-MetadataReject([scriptblock]$Run) {
+    $rejected = $false
+    try { & $Run | Out-Null } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Malformed release metadata was unexpectedly accepted.' }
+}
+foreach ($invalid in @([byte[]]@(), [byte[]]@(0xef,0xbb,0xbf), [byte[]]@(0xff,0xfe,0x7b,0x00), [byte[]]@(0xc3,0x28))) {
+    Assert-MetadataReject { ConvertFrom-ReleaseUtf8Bytes $invalid }
+    $metadataRejects++
+}
+Assert-MetadataReject { ConvertFrom-ReleaseUtf8Bytes ([byte[]]::new(1048577)) }; $metadataRejects++
+Assert-MetadataReject { (ConvertFrom-ReleaseUtf8Bytes ([byte[]](@(0xef,0xbb,0xbf) + $prefixedMetadata))) | ConvertFrom-Json }; $metadataRejects++
+Assert-MetadataReject { (ConvertFrom-ReleaseUtf8Bytes ([byte[]](@(0x20) + $prefixedMetadata))) | ConvertFrom-Json }; $metadataRejects++
+Write-Host "PASS publisher metadata: exact immutable legacy BOM fixture, unchanged input bytes, BOM-free UTF-8, distribution BOM, embedded Unicode and $metadataRejects malformed/oversized rejection cases; no publication invoked."
