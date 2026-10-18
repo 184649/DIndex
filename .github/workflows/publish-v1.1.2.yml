@@ -1,0 +1,46 @@
+name: Publish DIndex v1.1.2 once
+on:
+  push:
+    branches: [improve/performance-reliability-20261017]
+permissions: {}
+concurrency:
+  group: dindex-public-release-v1.1.2
+  cancel-in-progress: false
+jobs:
+  publish-approved-release:
+    if: >-
+      github.event.repository.private == false &&
+      github.event.before == '0824e6f0b4b5859da941076d36d96863ac9ea529' &&
+      github.event.head_commit.message == 'release: publish DIndex v1.1.2 from 0824e6f0b4b5859da941076d36d96863ac9ea529'
+    permissions:
+      contents: write
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 0824e6f0b4b5859da941076d36d96863ac9ea529
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Select preinstalled official .NET 10 SDK without installation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sdk = dotnet --list-sdks | ForEach-Object { if ($_ -match '^(10\.0\.\d+) ') { $Matches[1] } } | Sort-Object { [version]$_ } -Descending | Select-Object -First 1
+          if (-not $sdk) { throw 'Preinstalled .NET 10 SDK is required.' }
+          @{ sdk = @{ version = $sdk; rollForward = 'disable' } } | ConvertTo-Json -Depth 3 | Set-Content global.json -Encoding utf8
+          dotnet --info
+      - name: Release input and source-export regression
+        shell: pwsh
+        run: ./tests/StableRelease.Tests.ps1
+      - name: Build exact approved stable source and verify all packages
+        shell: pwsh
+        run: |
+          ./scripts/Build-StableRelease.ps1 -Version 1.1.2 -SourceCommit '0824e6f0b4b5859da941076d36d96863ac9ea529' -OutputDirectory "$env:RUNNER_TEMP\stable-release"
+          Get-Content "$env:RUNNER_TEMP\stable-release\verified-release.json" -Raw | Write-Host
+      - name: Publish, verify real legacy upgrade, and promote this release only
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/Publish-StableRelease.ps1 -PackageDirectory "$env:RUNNER_TEMP\stable-release\release" -SourceCommit '0824e6f0b4b5859da941076d36d96863ac9ea529' -DistributionCommit '33c1345897f403f21fe513f3aaa58534a0e1583d'
