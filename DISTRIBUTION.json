@@ -1,0 +1,12 @@
+{
+  "repository": "184649/DIndex",
+  "version": "1.1.2",
+  "sourceCommit": "652204c45a97a558d5ac73312e7591c1154e585a",
+  "tag": "v1.1.2",
+  "downloadUrl": "https://github.com/184649/DIndex/releases/download/v1.1.2/DIndex.zip",
+  "updaterUrl": "https://github.com/184649/DIndex/releases/download/v1.1.2/DIndexUpdater.zip",
+  "releaseNotes": "https://github.com/184649/DIndex/releases/download/v1.1.2/release-notes.json",
+  "sourceArchiveUrl": "https://github.com/184649/DIndex/releases/download/v1.1.2/DIndex-1.1.2-source.zip",
+  "buildProvenanceUrl": "https://github.com/184649/DIndex/releases/download/v1.1.2/build-provenance.json",
+  "description": "Metadata-only distribution snapshot; use the explicit source archive and source commit for application source."
+}
